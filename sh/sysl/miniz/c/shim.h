@@ -1,7 +1,9 @@
 #ifndef SYSL_MINIZ_SHIM_H
 #define SYSL_MINIZ_SHIM_H
 
-#include "miniz.h"
+/* `options.h` rather than `miniz.h`, for the reason that file gives: the options decide what miniz
+ * declares, and every translation unit here has to agree about them. */
+#include "options.h"
 
 /* What sysl cannot reach in miniz, which is three small things.
  *

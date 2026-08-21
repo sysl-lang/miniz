@@ -1,4 +1,7 @@
-#include "miniz.h"
+/* `options.h` rather than `miniz.h`, and that is load-bearing: the options it sets decide the size of
+ * `tdefl_compressor` and which symbols this file defines at all. The `c const` probe translation unit
+ * includes the same file, so the two agree by construction rather than by remembering. */
+#include "options.h"
 /**************************************************************************
  *
  * Copyright 2013-2014 RAD Game Tools and Valve Software

@@ -1,21 +1,3 @@
-/* ---- Vendored for sysl: the build options are set HERE and nowhere else. ----
- *
- * sysl compiles a package's C declaratively and runs no build script, so there is no command line
- * on which to put a -D. Every miniz option that deletes symbols or changes a struct therefore has
- * to live in this header, which both miniz.c and the shim include -- one translation unit's worth
- * of settings, agreed by construction rather than by remembering to repeat a flag.
- *
- *   MINIZ_NO_STDIO         no FILE* API; nothing here opens a file
- *   MINIZ_NO_TIME          no time.h; a package that reads no clock
- *   MINIZ_NO_ARCHIVE_APIS  no .zip reader or writer -- deflate and inflate only
- *   MINIZ_NO_MALLOC        no allocator at all; every buffer is the caller's
- *   TDEFL_LESS_MEMORY      compressor state 167,800 bytes instead of 319,352
- */
-#define MINIZ_NO_STDIO
-#define MINIZ_NO_TIME
-#define MINIZ_NO_ARCHIVE_APIS
-#define MINIZ_NO_MALLOC
-
 #ifndef MINIZ_EXPORT
 #define MINIZ_EXPORT
 #endif
@@ -658,8 +640,16 @@ extern "C" {
 /* ------------------- Low-level Compression API Definitions */
 
 /* Set TDEFL_LESS_MEMORY to 1 to use less memory (compression will be slightly slower, and raw/dynamic blocks will be output more frequently). */
+/* --- The one line of this header sysl's build changes, and why it cannot be done from outside. ---
+ *
+ * Upstream defines this unconditionally, so a definition made before including this file -- whether
+ * from `options.h`, from a -D, or from anything else -- is overridden here with a `macro redefined`
+ * warning and no other effect. Every other option this package sets is left where upstream put it
+ * and answered from `options.h`, which is the file to read for what is set and why.
+ *
+ * Guarding it is the smallest change that makes the option reachable at all. */
 #ifndef TDEFL_LESS_MEMORY
-#define TDEFL_LESS_MEMORY 1
+#define TDEFL_LESS_MEMORY 0
 #endif
 
 /* tdefl_init() compression flags logically OR'd together (low 12 bits contain the max. number of probes per dictionary search): */

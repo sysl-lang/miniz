@@ -111,12 +111,26 @@ sh/sysl/miniz/
   miniz.sysl        what a program calls: Deflater, Inflater, Result
   tests.sysl
   c/
-    miniz.c         upstream 3.0.2
-    miniz.h         upstream, with the build options set at the top
+    miniz.c         upstream 3.0.2, one include line changed
+    miniz.h         upstream 3.0.2, one #define guarded
+    options.h       the compile-time options, in one place
     shim.c          three functions sysl cannot reach
     c.sysl          the declarations, read out of the header
     tests.sysl      that sysl and clang agree about miniz
 ```
+
+**The options live in `options.h`, which all three translation units include** — the implementation,
+the shim, and the probe sysl synthesises to evaluate a `c const` block. Every one of them changes
+either the size of a state struct or which symbols exist, so a translation unit that disagreed would
+compile, link, and be wrong where nothing is looking. This is termbox2's `options.h` pattern, and it
+is why upstream is vendored essentially unmodified: two lines differ from the release tarball, and
+`diff` against a fresh download shows both.
+
+The second of those two is the interesting one. **`miniz.h` defines `TDEFL_LESS_MEMORY 0`
+unguarded**, so no definition made before including it survives — not from `options.h`, and not from
+a `-D` either, which earns a `macro redefined` warning and no other effect. Guarding it is the
+smallest change that makes the option reachable at all, and it is worth 151,552 bytes of compressor
+state.
 
 Two layers, because they answer to different things. The one in `c/` has to be **faithful** — a
 signature disagreeing with the header links perfectly and corrupts the call at run time — and the one

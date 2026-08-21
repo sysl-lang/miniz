@@ -33,12 +33,14 @@ package {
 // SDK's newlib, Zephyr and a FreeRTOS application -- see the README's "What is still hosted about
 // it".
 //
-// **The build options live in the vendored `miniz.h` itself**, because there is nowhere else they
-// could: sysl compiles a package's C declaratively and runs no build script, so nothing supplies a
-// `-D`, and miniz's own header defines `TDEFL_LESS_MEMORY` unguarded so a `-D` would be overridden
-// anyway. Both readers of that header therefore agree by construction. The raw layer's tests assert
-// the state sizes those options produce, so a setting that stopped applying fails a test rather than
-// costing 151,552 bytes of somebody's SRAM.
+// **The build options live in `options.h`, which every translation unit here includes** -- the
+// implementation, the shim, and the probe sysl synthesises for a `c const` block. sysl compiles a
+// package's C declaratively and runs no build script, so nothing supplies a `-D`; a wrapper header
+// both sides name is the arrangement that makes them agree by construction, and it is termbox2's.
+// Upstream is otherwise unmodified: two lines differ from the release tarball.
+//
+// The raw layer's tests assert the state sizes those options produce, so a setting that stopped
+// applying fails a test rather than costing 151,552 bytes of somebody's SRAM.
 //
 // **What is NOT here is a `@link` directive**, and the absence is the point of vendoring: the
 // implementation is compiled from the `.c` carried in this package, so there is no external library
