@@ -15,7 +15,7 @@
 
 module sh.sysl.miniz.c
 
-@include("options.h")
+@include("miniz.h")
 @include("shim.h")
 
 // ## The sizes, asked for rather than transcribed
