@@ -1,0 +1,182 @@
+module sh.sysl.miniz.c
+@tests
+
+import sysl.slices.{as_ptr, as_mut_ptr}
+
+// The survey's four questions, asked of the real compiler.
+//
+// Every number asserted below was measured with a C program compiled against the same vendored
+// header before it was written here, so a disagreement means sysl and clang see miniz differently --
+// which is the only failure this file is looking for.
+
+// -- 1. The sizes and alignments cross ---------------------------------------------------------------
+
+// **These are the numbers the whole API shape rests on.** Decompression needs ~41 KB of caller
+// storage and compression needs 164 KB, and the asymmetry is what says the two halves cannot be
+// presented as mirror images on a microcontroller.
+//
+// They are asserted against what C measured rather than against themselves, so a build option that
+// silently stopped applying -- `TDEFL_LESS_MEMORY` is set in the vendored header precisely because a
+// `-D` cannot reach it -- fails here instead of costing 151,552 bytes of somebody's SRAM.
+@test("the state sizes are the ones the vendored build options produce")
+state_sizes_are_the_configured_ones()
+    assert_eq(COMPRESSOR_SIZE, 167800)
+    assert_eq(DECOMPRESSOR_SIZE, 8376)
+    assert_eq(LZ_DICT_SIZE, 32768)
+end state_sizes_are_the_configured_ones
+
+// A `c const` reading `_Alignof` of a struct whose definition sysl never sees. Both states hold
+// pointers, so both want the machine's pointer alignment and a byte array standing in for one has to
+// meet it.
+@test("both states want pointer alignment")
+states_want_pointer_alignment()
+    assert_eq(COMPRESSOR_ALIGN, 8)
+    assert_eq(DECOMPRESSOR_ALIGN, 8)
+end states_want_pointer_alignment
+
+// -- 2. The flags cross ------------------------------------------------------------------------------
+
+// miniz packs the compressor's flags above a twelve-bit probe count, so these are not an index and
+// not consecutive -- the kind of table that should never be transcribed.
+@test("the flag bits are miniz's own, not an enumeration")
+flags_are_the_headers()
+    assert_eq(WRITE_ZLIB_HEADER, 0x1000)
+    assert_eq(COMPUTE_ADLER32, 0x2000)
+    assert_eq(FINISH, 4)
+    assert_eq(NO_FLUSH, 0)
+    assert_eq(PARSE_ZLIB_HEADER, 1)
+    assert_eq(NON_WRAPPING_OUTPUT, 4)
+    assert_eq(INFL_DONE, 0)
+end flags_are_the_headers
+
+// -- 3. Where 164 KB of state can live ---------------------------------------------------------------
+
+// **The question this probe was written for.** A compressor state is 167,800 bytes, which is not a
+// stack local on any target sysl builds for, so it has to be storage the caller places -- and a
+// module `var` is the only place a program can put something that size without an allocator.
+//
+// The alignment check is the half that would otherwise be assumed: a `[]u8` is a byte array, and
+// nothing about `[0; N]` promises the 8-byte alignment a struct full of pointers needs.
+var compressor_storage: [167800]u8 = [0; 167800]
+var decompressor_storage: [8376]u8 = [0; 8376]
+
+@test("module storage for a state is aligned as the struct requires")
+module_storage_is_aligned()
+    assert(is_aligned(as_ptr(compressor_storage), COMPRESSOR_ALIGN))
+    assert(is_aligned(as_ptr(decompressor_storage), DECOMPRESSOR_ALIGN))
+end module_storage_is_aligned
+
+// -- 4. The round trip -------------------------------------------------------------------------------
+
+// **The one that matters.** The same input the C probe used, through both halves, compared byte for
+// byte. A binding whose signatures disagreed with the header would link cleanly and fail exactly
+// here.
+//
+// 4096 bytes of a seven-byte cycle compressed to 36 bytes in C, which is asserted rather than merely
+// bounded: a compressor that silently fell back to raw blocks would still round trip, and would still
+// be a bug worth failing on.
+@test("bytes compress and come back identical, at the size C produced")
+round_trip_matches_c()
+    var src: []u8 = [0; 4096]
+
+    for i in 0..<src.len
+        src[i] = u8('a') + u8(i % 7)
+
+    var packed: []u8 = [0; 8192]
+
+    val comp: *Compressor = ptr_cast(as_mut_ptr(compressor_storage))
+
+    assert_eq(tdefl_init(comp, null, null, WRITE_ZLIB_HEADER | 128), STATUS_OKAY)
+
+    var in_len: usize = src.len
+    var out_len: usize = packed.len
+
+    val st = tdefl_compress(comp, as_ptr(src), &in_len, as_mut_ptr(packed), &out_len, FINISH)
+
+    assert_eq(st, STATUS_DONE)
+    assert_eq(in_len, 4096)
+    assert_eq(out_len, 36)
+
+    // Back the other way, into a buffer big enough for the whole output, which is what the
+    // non-wrapping flag promises the inflator.
+    var out: []u8 = [0; 4096]
+
+    val dec: *Decompressor = ptr_cast(as_mut_ptr(decompressor_storage))
+
+    tinfl_init(dec)
+
+    var src_len: usize = out_len
+    var dst_len: usize = out.len
+
+    val ds = tinfl_decompress(dec, as_ptr(packed), &src_len, as_mut_ptr(out), as_mut_ptr(out),
+                              &dst_len, PARSE_ZLIB_HEADER | NON_WRAPPING_OUTPUT)
+
+    assert_eq(ds, INFL_DONE)
+    assert_eq(dst_len, 4096)
+
+    for i in 0..<out.len
+        assert_eq(out[i], src[i])
+end round_trip_matches_c
+
+// -- The buffer a caller has to size -----------------------------------------------------------------
+
+// `compress_bound` is what makes the house pattern reachable: a caller asks how big the output can
+// get before it compresses, rather than growing a buffer until a call stops failing. The figure is
+// miniz's own worst case, checked against what C returned for a megabyte.
+@test("the worst-case output size is the library's, and it exceeds the input")
+compress_bound_is_the_librarys()
+    assert_eq(compress_bound(1048576), 1153561)
+    assert(compress_bound(0) > 0)
+end compress_bound_is_the_librarys
+
+// The checksums come free with the library and are worth having on their own -- a firmware image's
+// integrity check needs no compression at all.
+@test("crc32 of the standard check vector")
+crc32_matches_the_check_vector()
+    val s = "123456789"
+
+    assert_eq(crc32(0, as_ptr(s.bytes), s.bytes.len), 0xCBF43926)
+    assert_eq(adler32(1, as_ptr(s.bytes), s.bytes.len), 0x091E01DE)
+end crc32_matches_the_check_vector
+
+// -- The independent oracle --------------------------------------------------------------------------
+
+// **miniz round-tripping its own output proves the binding is self-consistent, not that it is
+// right.** These 36 bytes were produced by zlib, a different implementation of RFC 1950 -- so
+// inflating them exercises the agreement between miniz and the format rather than between miniz and
+// itself, which is the difference between a test and an opinion.
+//
+// They are not the same 36 bytes miniz produces from this input. Both are 36 long and both are valid
+// zlib streams; they differ in the header's level bits and in which matches the two encoders chose,
+// which is exactly why asserting byte-equality of compressed output would be asserting an
+// implementation detail.
+@test("a stream another implementation produced inflates to the original bytes")
+inflates_what_zlib_produced()
+    val packed: [36]u8 = [
+        0x78, 0xda, 0xed, 0xc5, 0x41, 0x11, 0x00, 0x30, 0x08, 0x00, 0xa0, 0xac,
+        0xea, 0xa6, 0xfd, 0x1b, 0xd8, 0xc3, 0x83, 0x0f, 0x91, 0xf5, 0x7e, 0x4f,
+        0x48, 0x92, 0x24, 0x49, 0x92, 0xa4, 0xbb, 0x2d, 0xde, 0x4c, 0x40, 0x58
+    ]
+
+    var out: []u8 = [0; 4096]
+
+    val dec: *Decompressor = ptr_cast(as_mut_ptr(decompressor_storage))
+
+    tinfl_init(dec)
+
+    var src_len: usize = packed.len
+    var dst_len: usize = out.len
+
+    val ds = tinfl_decompress(dec, as_ptr(packed), &src_len, as_mut_ptr(out), as_mut_ptr(out),
+                              &dst_len, PARSE_ZLIB_HEADER | NON_WRAPPING_OUTPUT)
+
+    assert_eq(ds, INFL_DONE)
+    assert_eq(dst_len, 4096)
+
+    for i in 0..<out.len
+        assert_eq(out[i], u8('a') + u8(i % 7))
+
+    // And the checksum of what came out, against what the same other implementation computed over
+    // the same bytes.
+    assert_eq(crc32(0, as_ptr(out), out.len), 0x2882D524)
+end inflates_what_zlib_produced

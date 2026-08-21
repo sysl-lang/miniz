@@ -1,0 +1,100 @@
+// miniz as C declares it: the deflate and inflate surface, the three shim functions, and the numbers
+// its header holds.
+//
+// **Everything that is C lives in this directory** -- `miniz.c` and `miniz.h` as they come from
+// upstream but for the build options described below, the `shim.c` answering for the three things
+// sysl cannot reach, and this file of declarations over them. Nothing here is meant to be called by a
+// program: a state is a slab of caller memory, a failure is a negative integer, and a length crosses
+// through a pointer. The module above turns those into `Deflater`, `Inflater` and a `Result`.
+//
+// **The build options are set in the vendored `miniz.h` and nowhere else, because there is nowhere
+// else.** sysl compiles a package's C declaratively and runs no build script, so no `-D` reaches this
+// translation unit -- and miniz's header would defeat one anyway, since it defines
+// `TDEFL_LESS_MEMORY` unguarded. Both readers of the header therefore agree by construction, which is
+// the trap termbox2's `TB_OPT_ATTR_W` is.
+
+module sh.sysl.miniz.c
+
+@include("miniz.h")
+@include("shim.h")
+
+// ## The sizes, asked for rather than transcribed
+//
+// Both state structs are caller-owned, so their sizes are interface rather than implementation detail
+// -- and both move with the build options set in the vendored header, which is exactly why nothing
+// here writes a number down.
+c const
+    COMPRESSOR_SIZE:    usize = "sizeof(tdefl_compressor)"
+    COMPRESSOR_ALIGN:   usize = "_Alignof(tdefl_compressor)"
+    DECOMPRESSOR_SIZE:  usize = "sizeof(tinfl_decompressor)"
+    DECOMPRESSOR_ALIGN: usize = "_Alignof(tinfl_decompressor)"
+    LZ_DICT_SIZE:       usize = "TINFL_LZ_DICT_SIZE"
+
+// ## The flags
+//
+// The compressor's low twelve bits are a probe count and the flags above them are these; 128 probes
+// is what upstream calls a reasonable default.
+c const
+    WRITE_ZLIB_HEADER: int = "TDEFL_WRITE_ZLIB_HEADER"
+    COMPUTE_ADLER32:   int = "TDEFL_COMPUTE_ADLER32"
+    NO_FLUSH:          int = "TDEFL_NO_FLUSH"
+    FINISH:            int = "TDEFL_FINISH"
+    STATUS_OKAY:       int = "TDEFL_STATUS_OKAY"
+    STATUS_DONE:       int = "TDEFL_STATUS_DONE"
+
+c const
+    PARSE_ZLIB_HEADER:   uint = "TINFL_FLAG_PARSE_ZLIB_HEADER"
+    HAS_MORE_INPUT:      uint = "TINFL_FLAG_HAS_MORE_INPUT"
+    NON_WRAPPING_OUTPUT: uint = "TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF"
+    INFL_DONE:              int  = "TINFL_STATUS_DONE"
+    INFL_NEEDS_MORE_INPUT:  int  = "TINFL_STATUS_NEEDS_MORE_INPUT"
+    INFL_HAS_MORE_OUTPUT:   int  = "TINFL_STATUS_HAS_MORE_OUTPUT"
+
+    // **The status a stream that simply stopped comes back as.** miniz returns this when it needs at
+    // least one more input byte and the caller has said there are none -- which is a truncated stream
+    // rather than a corrupt one, and is the only thing telling the two apart.
+    INFL_CANNOT_PROGRESS:   int  = "TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS"
+
+// ## The two states
+//
+// Opaque, because a program has no business reading either one -- and because the compressor's
+// definition is 25 fields of miniz's own bookkeeping.
+opaque struct Compressor
+opaque struct Decompressor
+
+// ## Compression
+//
+// `put` and `user` are the callback route, which this probe does not take: passing null selects the
+// buffer-to-buffer form, where the caller owns both sides.
+extern "tdefl_init" tdefl_init(d: *Compressor, put: *u8, user: *u8, flags: int) -> int
+
+extern "tdefl_compress" tdefl_compress(d: *Compressor, in_buf: *u8, in_size: *usize,
+                                       out_buf: *u8, out_size: *usize, flush: int) -> int
+
+// The worst case a compressed block can occupy, which is what makes a caller-sized output buffer
+// possible at all.
+extern "mz_compressBound" compress_bound(source_len: ulong) -> ulong
+
+// ## Decompression
+//
+// **`tinfl_init` is a macro, so it has no symbol and the shim is mandatory** -- the third of the
+// C-only shapes. `tinfl_decompress` beside it is an ordinary function.
+extern "sysl_miniz_tinfl_init" tinfl_init(r: *Decompressor)
+
+extern "tinfl_decompress" tinfl_decompress(r: *Decompressor, in_next: *u8, in_size: *usize,
+                                           out_start: *u8, out_next: *u8, out_size: *usize,
+                                           flags: uint) -> int
+
+extern "sysl_miniz_tinfl_get_adler32" tinfl_get_adler32(r: *Decompressor) -> uint
+
+// ## The checksums, which are useful on their own
+extern "mz_crc32" crc32(crc: ulong, buf: *u8, len: usize) -> ulong
+extern "mz_adler32" adler32(adler: ulong, buf: *u8, len: usize) -> ulong
+
+// ## Alignment
+//
+// The first address at or after `p` that `alignment` divides. sysl has no pointer-to-integer cast, so
+// both of these are asked in C.
+extern "sysl_miniz_align" align_up(p: *u8, alignment: usize) -> *u8
+
+extern "sysl_miniz_is_aligned" is_aligned(p: *u8, alignment: usize) -> bool

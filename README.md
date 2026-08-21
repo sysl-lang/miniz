@@ -1,0 +1,147 @@
+# miniz
+
+Deflate and inflate for sysl, bound to [miniz](https://github.com/richgel999/miniz) — with no
+allocator anywhere, including for the compressor's own working state.
+
+```sysl
+import sh.sysl.miniz.{DEFLATE_BYTES, INFLATE_BYTES, deflate, inflate, bound}
+
+var work: [DEFLATE_BYTES]u8 = [0; DEFLATE_BYTES]
+var packed: []u8 = [0; 512]
+
+val n = deflate(work, text.bytes, packed).unwrap()
+```
+
+Everything is a caller-supplied slice: the input, the output, and the state the codec runs in. That
+is what makes the package usable where there is no heap, and it is also what makes its shape unusual
+— a `Deflater` is not something you create, it is something you *place* in storage you already have.
+
+## The two halves are not the same size
+
+This is the most useful thing to know about the library, and it decides how a project should be
+arranged:
+
+| | state | fits an RP2040 (264 KB)? | fits an RP2350 (520 KB)? |
+|---|---|---|---|
+| inflate | **8,383 bytes** | comfortably | comfortably |
+| deflate | **167,807 bytes** | no | yes, at a third of RAM |
+
+So the expected arrangement is asymmetric: **compress on a host, inflate on the device.** A firmware
+image, a font, a level, a page of help text — packed by a build step, unpacked where it is used.
+Both halves are here because both are sometimes wanted, not because they are equals.
+
+The compressor is already the smaller of miniz's two configurations. `TDEFL_LESS_MEMORY` is on,
+which trades slightly worse ratios for 151,552 fewer bytes; without it the state is 319,352.
+
+## What you get
+
+| | |
+|---|---|
+| `deflate(work, src, dst, level, format)` | one call, answers bytes written |
+| `inflate(work, src, dst, format)` | one call, answers bytes written |
+| `deflater(work, …)` / `Deflater.push(src, dst, finish)` | feed input in chunks |
+| `inflater(work, …)` / `Inflater.push(src, dst, more)` | take the compressed stream in chunks |
+| `bound(len)` | the largest a compressed stream can be |
+| `crc32(bytes)` / `adler32(bytes)` | useful without compressing anything |
+
+`Level` is `Fastest`, `Fast`, `Default` or `Best` — miniz spends its effort looking for earlier
+matches, and the count of attempts is the whole knob. `Format` is `Zlib` (a two-byte header and a
+trailing adler-32, which the inflator verifies for you) or `Raw` (neither, six bytes shorter, for a
+container that already frames and checks its contents).
+
+### The streaming shape is the one an update over a wire wants
+
+`Inflater` takes the destination whole and the *input* in pieces, which is the way round that
+matters: the size of what you are unpacking is known — it is in a header of your own, or it is the
+fixed size of the thing — while the compressed bytes arrive a packet at a time.
+
+```sysl
+var work: [INFLATE_BYTES]u8 = [0; INFLATE_BYTES]
+var image: []u8 = [0; 65536]
+
+var inf = inflater(work).unwrap()
+
+while val chunk = next_packet()
+    inf.push(chunk, image, more_expected).unwrap()
+
+assert(inf.done)
+```
+
+Passing `more` while further chunks are expected is what turns "waiting for input" into a
+`Truncated` on the last one.
+
+## What the errors say
+
+A binding earns its keep here, because miniz reports a short output buffer and a corrupt stream as
+two negative integers a caller has to know apart.
+
+| | |
+|---|---|
+| `Short(needed)` | compressing: `dst` too small. `needed` is `bound(src.len)` — a ceiling, since miniz cannot say what it would really have taken |
+| `Full` | inflating: `dst` too small, with no figure to give, because the length of what remains is exactly what a compressed stream does not carry |
+| `Truncated` | the input stopped mid-stream. **Half a download, not a corrupt one** — the difference matters to whatever is retrying |
+| `Corrupt` | not a valid stream, or the wrapper's checksum disagreed with the data |
+| `NoRoom(needed)` | the storage slice is smaller than `DEFLATE_BYTES` or `INFLATE_BYTES` |
+
+`Truncated` and `Corrupt` are genuinely distinguished, and each has a test that would fail if the
+other were returned.
+
+## What is still hosted about it
+
+The package asks nothing of sysl — no allocator, no clock, no file, no operating system — and
+`requires {}` would be exact. **That is not the same as compiling for a bare target, and the two get
+conflated constantly.**
+
+`miniz.h` includes `<assert.h>`, `<stdlib.h>` and `<string.h>` unconditionally. clang gives a
+freestanding target `limits.h`, `stdint.h`, `stddef.h` and `stdbool.h` and none of those three, so:
+
+```
+sysl build-lib . --target thumb-freestanding
+error: the C compiler refused this file's 'c const' block:
+miniz.h:555:10: fatal error: 'assert.h' file not found
+```
+
+That was run, not reasoned about. A target **with a libc** is fine, and that covers the interesting
+ones: the Pico SDK carries newlib, as do Zephyr and FreeRTOS applications.
+
+## How it is put together
+
+```
+sh/sysl/miniz/
+  miniz.sysl        what a program calls: Deflater, Inflater, Result
+  tests.sysl
+  c/
+    miniz.c         upstream 3.0.2
+    miniz.h         upstream, with the build options set at the top
+    shim.c          three functions sysl cannot reach
+    c.sysl          the declarations, read out of the header
+    tests.sysl      that sysl and clang agree about miniz
+```
+
+Two layers, because they answer to different things. The one in `c/` has to be **faithful** — a
+signature disagreeing with the header links perfectly and corrupts the call at run time — and the one
+above it has to be **pleasant**, which is a different question that would otherwise get answered in
+the same breath.
+
+**Three things need the shim.** `tinfl_init` and `tinfl_get_adler32` are macros rather than
+functions, so there is no symbol to link; and alignment has to be computed in C, because sysl has no
+pointer-to-integer cast. That last one is why the exported byte counts are a `sizeof` plus seven: a
+state holds pointers, a `[]u8` promises nothing about its address, so the state is placed at the
+first aligned offset inside whatever slice it is given rather than trusting that the slice was
+aligned. Every one observed while writing this package happened to be — which is not the same as
+being guaranteed one.
+
+## Tests
+
+`sysl test .` — 25 tests, both layers.
+
+The one worth knowing about: miniz round-tripping its own output proves the binding is
+self-consistent, not that it is *right*. So the suite also inflates 36 bytes **zlib** produced from
+the same input, and cross-checks `crc32` against zlib's. Note the two implementations compress that
+input to different 36 bytes — same length, different header level bits and different match choices —
+which is why what is asserted is what a stream decompresses to, and never what a compressor emits.
+
+## Licence
+
+miniz is MIT, © 2013-2014 RAD Game Tools and Valve Software, © 2010-2014 Rich Geldreich and Tenacious
+Software LLC. `LICENSE` is upstream's, and it covers the vendored `miniz.c` and `miniz.h`.

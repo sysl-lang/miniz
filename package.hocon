@@ -1,0 +1,45 @@
+// Deflate and inflate, bound to miniz.
+//
+// There is no `dependencies` block because miniz depends on nothing a package manager could fetch --
+// it is two files, both carried here, and what they include from the C library is `<assert.h>`,
+// `<stdlib.h>` and `<string.h>`. It is not a library anybody has installed.
+//
+// This is the block a *consumer* writes to reach this package:
+//
+//     dependencies {
+//       miniz { git = "github.com/sysl-lang/miniz", version = "0.1.0" }
+//     }
+//
+// The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
+// tag `v0.1.0` on this repository.
+
+package {
+  name    = "miniz"
+  version = "0.1.0"
+}
+
+// **There is deliberately no `requires` block, though `requires {}` would be exact.**
+//
+// A capability clause is a claim about what a library *does*, and what miniz does here is arithmetic
+// on buffers it was handed. It opens no file, reads no clock, and calls no allocator -- not because
+// the calls are unused but because `MINIZ_NO_MALLOC` removes them, along with `MINIZ_NO_STDIO`,
+// `MINIZ_NO_TIME` and `MINIZ_NO_ARCHIVE_APIS` taking the `.zip` reader and every heap-returning
+// helper with them. Even the compressor's 167,800-byte working state is storage the caller places.
+//
+// **Whether the headers exist on a bare target is the C toolchain's business, and there they do
+// not.** `miniz.h` includes `<assert.h>`, `<stdlib.h>` and `<string.h>` unconditionally; clang gives
+// a freestanding target none of the three, so `--target thumb-freestanding` fails on the include.
+// This was run rather than reasoned about. A target with a libc is fine, which includes the Pico
+// SDK's newlib, Zephyr and a FreeRTOS application -- see the README's "What is still hosted about
+// it".
+//
+// **The build options live in the vendored `miniz.h` itself**, because there is nowhere else they
+// could: sysl compiles a package's C declaratively and runs no build script, so nothing supplies a
+// `-D`, and miniz's own header defines `TDEFL_LESS_MEMORY` unguarded so a `-D` would be overridden
+// anyway. Both readers of that header therefore agree by construction. The raw layer's tests assert
+// the state sizes those options produce, so a setting that stopped applying fails a test rather than
+// costing 151,552 bytes of somebody's SRAM.
+//
+// **What is NOT here is a `@link` directive**, and the absence is the point of vendoring: the
+// implementation is compiled from the `.c` carried in this package, so there is no external library
+// for the linker to be given.

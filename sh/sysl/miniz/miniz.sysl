@@ -1,0 +1,300 @@
+// Deflate and inflate, bound to miniz, with no allocator anywhere.
+//
+// **Every buffer here is the caller's, including the compressor's own working state.** That is what
+// makes the package usable where there is no heap, and it is also what makes its shape unusual: a
+// `Deflater` is not something you create, it is something you place in storage you already have.
+//
+//     var storage: [DEFLATE_BYTES]u8 = [0; DEFLATE_BYTES]
+//     var out: []u8 = [0; 4096]
+//
+//     val n = deflate(storage, source, out).unwrap()
+//
+// ## The two halves are not the same size, and on a microcontroller that decides everything
+//
+// A compressor's state is **167,800 bytes** and a decompressor's is **8,376**. Both figures are
+// miniz's, read out of the header rather than written down here, and the ratio between them is the
+// single most useful thing to know about this library: inflate fits comfortably on an RP2040, and
+// deflate does not fit one at all.
+//
+// So the expected arrangement is asymmetric. **Compress on a host and inflate on the device** -- a
+// firmware image, a font, a level, a page of help text, packed by a build step and unpacked where it
+// is used. Both halves are here because both are sometimes wanted, not because they are equals.
+//
+// ## What it asks of the machine
+//
+// Nothing. No allocator, no clock, no file, no operating system -- miniz is compiled here with
+// `MINIZ_NO_MALLOC`, `MINIZ_NO_STDIO`, `MINIZ_NO_TIME` and `MINIZ_NO_ARCHIVE_APIS`, so the `.zip`
+// reader and every heap-returning helper are not merely unused but absent.
+//
+// **That is a claim about what this package asks of sysl, and not a claim that it compiles for a bare
+// target.** miniz's header includes `<assert.h>`, `<stdlib.h>` and `<string.h>` unconditionally, and
+// clang gives a freestanding target none of the three, so `--target thumb-freestanding` fails on the
+// include. Any target with a libc is fine, and that covers the interesting ones: the Pico SDK's
+// newlib, Zephyr, and a FreeRTOS application.
+
+module sh.sysl.miniz
+
+import sh.sysl.miniz.c
+import sysl.slices.{as_ptr, as_mut_ptr}
+
+// ## Storage
+//
+// How many bytes of caller storage each half needs. **Both are a `sizeof` plus seven**, and the seven
+// is alignment: a state holds pointers, a `[]u8` promises nothing about its address, so the state is
+// placed at the first aligned offset inside whatever slice it is given.
+
+// Storage for one `Deflater`.
+const DEFLATE_BYTES: usize = c.COMPRESSOR_SIZE + c.COMPRESSOR_ALIGN - 1
+
+// Storage for one `Inflater`.
+const INFLATE_BYTES: usize = c.DECOMPRESSOR_SIZE + c.DECOMPRESSOR_ALIGN - 1
+
+// ## How hard to try
+//
+// miniz spends its effort looking for earlier matches, and the count of attempts is the whole knob.
+// The names are zlib's, and so are the numbers behind them.
+enum Level
+    // No search at all beyond the cheapest match. Fastest, and still compresses repetitive data well.
+    Fastest
+
+    // What zlib calls level 1.
+    Fast
+
+    // 128 probes, which is what miniz itself calls a reasonable default.
+    Default
+
+    // 4095 probes, the most miniz will do. Slower by a large factor on data that does not compress.
+    Best
+
+    probes(self) -> int = self match
+        Fastest -> 1
+        Fast    -> 6
+        Default -> 128
+        Best    -> 4095
+end Level
+
+// Whether the stream carries a zlib wrapper -- a two-byte header and a trailing adler-32 -- or is
+// bare deflate with neither.
+//
+// **Take `Zlib` unless something else has already decided.** The wrapper costs six bytes and buys a
+// checksum the inflator verifies for you, which is what tells a truncated download from a complete
+// one. `Raw` is for a container that already frames and checks its contents, which is most of them:
+// a PNG chunk, a gzip member, a zip entry.
+enum Format
+    Zlib
+    Raw
+end Format
+
+// Why a compress or an inflate did not finish.
+enum Error
+    // The output slice cannot hold the answer. **`needed` is a ceiling rather than the exact figure**
+    // -- unlike qoi, miniz cannot say what it would really have taken, so this is `bound(src.len)`,
+    // which is what a caller should have sized the buffer to in the first place.
+    Short(needed: usize)
+
+    // Inflating: the output ran out before the stream ended. There is no figure to report, because
+    // the length of what is left is precisely what a compressed stream does not say -- which is why
+    // an `Inflater` is the answer for anything whose size is not known up front.
+    Full
+
+    // The input ended in the middle of a stream. More bytes would have continued it, so this is what
+    // a partial download looks like rather than a corrupt one.
+    Truncated
+
+    // The bytes are not a valid stream, or the zlib wrapper's checksum did not match what the data
+    // decompressed to. miniz does not distinguish the two after the fact and neither does this.
+    Corrupt
+
+    // The storage slice is smaller than `DEFLATE_BYTES` or `INFLATE_BYTES`. `needed` is which.
+    NoRoom(needed: usize)
+end Error
+
+// How far a single step got. Both fields count bytes of this call, not of the stream.
+struct Progress
+    // Input bytes taken. Less than the slice's length means the output filled first and the rest of
+    // the input has still to be offered.
+    consumed: usize
+
+    // Output bytes written, at the end of what earlier steps wrote.
+    produced: usize
+
+    // Whether the stream is finished. A `Deflater` says so once it has been asked to finish and has
+    // flushed everything; an `Inflater` says so on reaching the end of the compressed data.
+    done: bool
+end Progress
+
+// The largest a compressed stream can be for an input of `len` bytes.
+//
+// Incompressible input is *larger* compressed than raw, because deflate has to frame it -- so this is
+// what an output buffer must be for a compress to be certain of fitting, and it is worth calling
+// rather than guessing. `Short` reports it too, for a caller that guessed anyway.
+bound(len: usize) -> usize = usize(c.compress_bound(ulong(len)))
+
+// CRC-32 of `bytes`, as zlib and gzip and PNG all compute it.
+//
+// Here because miniz has it and it is useful without compressing anything: an image in flash needs
+// its integrity checked whether or not it was packed.
+crc32(bytes: []const u8) -> u32 = u32(c.crc32(0, as_ptr(bytes), bytes.len))
+
+// Adler-32 of `bytes`, which is what a zlib wrapper carries. Cheaper than CRC-32 and weaker.
+adler32(bytes: []const u8) -> u32 = u32(c.adler32(1, as_ptr(bytes), bytes.len))
+
+// ## Compressing
+
+// A compressor placed in storage the caller owns.
+struct Deflater
+    state: *c.Compressor
+
+    // Where in the destination the next output goes, so a caller feeding several chunks does not
+    // have to track it.
+    written: usize
+
+    // Take another chunk of input, writing into `dst` after everything written so far.
+    //
+    // `dst` must be the **same slice** on every call -- the compressor writes at a growing offset
+    // into it, and `written` is that offset. Pass `finish` on the last chunk, or on the only one;
+    // until then the compressor is entitled to hold bytes back, and `produced` may be zero for a
+    // chunk that told it nothing new.
+    //
+    // A `Progress` whose `consumed` is short of `src.len` means `dst` filled up. That is not an
+    // error -- a caller draining into a larger buffer would carry on -- but for a one-shot into a
+    // fixed slice it is, which is why `deflate` below turns it into `Short`.
+    push(*self, src: []const u8, dst: []u8, finish: bool) -> Result[Progress, Error]
+        var in_len: usize = src.len
+        var out_len: usize = dst.len - self.written
+
+        val status = c.tdefl_compress(self.state, as_ptr(src), &in_len,
+                                      as_mut_ptr(dst[self.written..]), &out_len,
+                                      if finish then c.FINISH else c.NO_FLUSH)
+
+        if status < c.STATUS_OKAY then return Err(Corrupt)
+
+        self.written += out_len
+
+        Ok(Progress(in_len, out_len, status == c.STATUS_DONE))
+    end push
+end Deflater
+
+// Place a compressor in `storage`, which must be at least `DEFLATE_BYTES` bytes.
+//
+// The storage has to outlive the `Deflater` and must not be touched while it is in use -- it *is*
+// the compressor. A module `var` is the usual home for something this size; a stack array works on
+// a host and will not on a microcontroller.
+deflater(storage: []u8, level: Level = Level.Default,
+             format: Format = Format.Zlib) -> Result[Deflater, Error]
+    if storage.len < DEFLATE_BYTES then return Err(NoRoom(DEFLATE_BYTES))
+
+    val state: *c.Compressor = ptr_cast(c.align_up(as_mut_ptr(storage), c.COMPRESSOR_ALIGN))
+
+    val wrapper = format match
+        Zlib -> c.WRITE_ZLIB_HEADER
+        Raw  -> 0
+
+    val flags = level.probes() | wrapper
+
+    if c.tdefl_init(state, null, null, flags) != c.STATUS_OKAY then return Err(Corrupt)
+
+    Ok(Deflater(state, 0))
+end deflater
+
+// Compress `src` into `dst` in one call, answering how many bytes were written.
+//
+// `dst` should be `bound(src.len)` bytes for this to be certain of fitting. A smaller slice is worth
+// trying whenever the data is expected to compress, since the answer is usually far under the bound
+// -- and `Short` says what the bound was.
+deflate(storage: []u8, src: []const u8, dst: []u8, level: Level = Level.Default,
+            format: Format = Format.Zlib) -> Result[usize, Error]
+    var d = deflater(storage, level, format)?
+
+    val step = d.push(src, dst, true)?
+
+    if !step.done || step.consumed < src.len then return Err(Short(bound(src.len)))
+
+    Ok(d.written)
+end deflate
+
+// ## Inflating
+
+// A decompressor placed in storage the caller owns.
+//
+// **This is the half that runs on the device**, and the shape it is given here is the one an update
+// over a wire wants: the destination is known and whole, the *input* is what arrives in pieces.
+struct Inflater
+    state: *c.Decompressor
+
+    // How much of the destination has been filled.
+    written: usize
+
+    // Whether the end of the stream has been reached.
+    done: bool
+
+    format: Format
+
+    // Take another chunk of the compressed stream, writing into `dst` after what is already there.
+    //
+    // `dst` must be the **same slice** on every call and must be big enough for the whole of the
+    // decompressed data -- inflate needs the 32 KB before the current position to resolve a back
+    // reference, and this arrangement gives it the real thing rather than a rolling window.
+    //
+    // Pass `more` while further chunks are still expected; on the last one pass `false`, which is
+    // what turns "waiting for input" into `Truncated`.
+    push(*self, src: []const u8, dst: []u8, more: bool) -> Result[Progress, Error]
+        var in_len: usize = src.len
+        var out_len: usize = dst.len - self.written
+
+        var flags = c.NON_WRAPPING_OUTPUT
+
+        if self.format == Format.Zlib then flags |= c.PARSE_ZLIB_HEADER
+        if more then flags |= c.HAS_MORE_INPUT
+
+        val status = c.tinfl_decompress(self.state, as_ptr(src), &in_len,
+                                        as_mut_ptr(dst), as_mut_ptr(dst[self.written..]),
+                                        &out_len, flags)
+
+        self.written += out_len
+
+        if status == c.INFL_DONE then
+            self.done = true
+
+            return Ok(Progress(in_len, out_len, true))
+
+        if status == c.INFL_NEEDS_MORE_INPUT then
+            if more then return Ok(Progress(in_len, out_len, false))
+
+            return Err(Truncated)
+
+        if status == c.INFL_HAS_MORE_OUTPUT then return Err(Full)
+
+        // **`CANNOT_PROGRESS` is what a stream that stopped early looks like**, and it is a different
+        // status from the one bad data gives -- miniz reaches it by wanting another byte when the
+        // caller has said there are none, rather than by failing to decode what it has.
+        if status == c.INFL_CANNOT_PROGRESS then return Err(Truncated)
+
+        Err(Corrupt)
+    end push
+end Inflater
+
+// Place a decompressor in `storage`, which must be at least `INFLATE_BYTES` bytes.
+inflater(storage: []u8, format: Format = Format.Zlib) -> Result[Inflater, Error]
+    if storage.len < INFLATE_BYTES then return Err(NoRoom(INFLATE_BYTES))
+
+    val state: *c.Decompressor = ptr_cast(c.align_up(as_mut_ptr(storage), c.DECOMPRESSOR_ALIGN))
+
+    c.tinfl_init(state)
+
+    Ok(Inflater(state, 0, false, format))
+end inflater
+
+// Inflate the whole of `src` into `dst` in one call, answering how many bytes were written.
+//
+// `dst` has to be large enough for all of it. A compressed stream does not say how large that is, so
+// the size has to come from somewhere else -- a header of your own, or the fixed size of the thing
+// being unpacked. `Full` is what a `dst` that was too small looks like.
+inflate(storage: []u8, src: []const u8, dst: []u8,
+            format: Format = Format.Zlib) -> Result[usize, Error]
+    var i = inflater(storage, format)?
+
+    i.push(src, dst, false)?
+
+    Ok(i.written)
+end inflate

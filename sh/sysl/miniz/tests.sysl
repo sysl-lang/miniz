@@ -1,0 +1,318 @@
+module sh.sysl.miniz
+@tests
+
+// What a program sees, tested at the surface a program actually calls.
+//
+// The raw layer's tests beside this one check that sysl and clang agree about miniz. These check
+// something different: that the `Result` this package answers is the one the situation deserves --
+// which is most of what a binding is for, since miniz itself reports a short output buffer and a
+// corrupt stream as two negative integers a caller has to know apart.
+
+// Storage lives at module scope because that is where a program this size would put it: 167,807
+// bytes is not a stack local anywhere it matters, and writing it this way in the tests keeps the
+// example honest.
+var deflate_storage: [DEFLATE_BYTES]u8 = [0; DEFLATE_BYTES]
+var inflate_storage: [INFLATE_BYTES]u8 = [0; INFLATE_BYTES]
+
+// Text that compresses, because English does. Repetitive enough to exercise back references across
+// a chunk boundary in the streaming tests.
+private sample() -> string =
+    "the quick brown fox jumps over the lazy dog, and the quick brown fox does it again, " +
+    "and again, and again, until the lazy dog is thoroughly bored of the whole business."
+
+// -- The sizes this package exports ------------------------------------------------------------------
+
+// **The asymmetry is the package's most important fact**, so it is asserted rather than left in
+// prose: a compressor is twenty times a decompressor, which is what decides that a device inflates
+// and a host deflates.
+@test("the two states differ by the factor that decides where each half runs")
+storage_sizes_are_asymmetric()
+    assert_eq(DEFLATE_BYTES, 167807)
+    assert_eq(INFLATE_BYTES, 8383)
+
+    assert(DEFLATE_BYTES > INFLATE_BYTES * 20)
+end storage_sizes_are_asymmetric
+
+// The bound is a ceiling and exceeds the input, which is the whole reason to call it: deflate can
+// make incompressible data bigger, and a buffer sized to the input would then be too small.
+@test("the bound exceeds the input it is asked about")
+bound_exceeds_its_input()
+    assert(bound(0) > 0)
+    assert(bound(1024) > 1024)
+    assert(bound(1048576) > 1048576)
+end bound_exceeds_its_input
+
+// -- The round trip ----------------------------------------------------------------------------------
+
+@test("text compresses and comes back exactly")
+text_round_trips()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    // It is text; it had better have got smaller.
+    assert(n < text.bytes.len)
+
+    var out: []u8 = [0; 512]
+
+    val m = inflate(inflate_storage, packed[0..<n], out).unwrap()
+
+    assert_eq(m, text.bytes.len)
+
+    for i in 0..<m
+        assert_eq(out[i], text.bytes[i])
+end text_round_trips
+
+// Empty input is the edge every codec gets wrong somewhere. A zlib stream of nothing is still a
+// stream -- header and checksum -- so this is not a no-op.
+@test("empty input round trips through a stream that is not itself empty")
+empty_round_trips()
+    val nothing: []u8 = []
+    var packed: []u8 = [0; 64]
+
+    val n = deflate(deflate_storage, nothing, packed).unwrap()
+
+    assert(n > 0)
+
+    var out: []u8 = [0; 64]
+
+    assert_eq(inflate(inflate_storage, packed[0..<n], out).unwrap(), 0)
+end empty_round_trips
+
+// Raw deflate carries no header and no checksum, so it is six bytes shorter and has to be inflated
+// as raw too -- a mismatch is what `Corrupt` is for, and that is the test below.
+@test("raw deflate is shorter than the wrapped form and round trips on its own terms")
+raw_round_trips()
+    val text = sample()
+    var wrapped: []u8 = [0; 512]
+    var raw: []u8 = [0; 512]
+
+    val w = deflate(deflate_storage, text.bytes, wrapped).unwrap()
+    val r = deflate(deflate_storage, text.bytes, raw, Level.Default, Format.Raw).unwrap()
+
+    assert_eq(w, r + 6)
+
+    var out: []u8 = [0; 512]
+
+    assert_eq(inflate(inflate_storage, raw[0..<r], out, Format.Raw).unwrap(), text.bytes.len)
+end raw_round_trips
+
+// Trying harder produces less, which is the only observable difference between the levels and the
+// only thing worth asserting about them.
+@test("a higher level compresses at least as well as a lower one")
+levels_order_by_size()
+    val text = sample()
+    var fastest: []u8 = [0; 512]
+    var best: []u8 = [0; 512]
+
+    val f = deflate(deflate_storage, text.bytes, fastest, Level.Fastest).unwrap()
+    val b = deflate(deflate_storage, text.bytes, best, Level.Best).unwrap()
+
+    assert(b <= f)
+end levels_order_by_size
+
+// -- The errors ----------------------------------------------------------------------------------
+
+// A caller that guessed the output size gets told what it should have asked for. **The figure is
+// `bound`'s**, not the exact length -- miniz cannot say the latter once it has run out of room.
+@test("an output slice too small to compress into answers Short, carrying the bound")
+short_output_reports_the_bound()
+    val text = sample()
+    var tiny: []u8 = [0; 8]
+
+    deflate(deflate_storage, text.bytes, tiny) match
+        Err(Short(needed)) -> assert_eq(needed, bound(text.bytes.len))
+        _ -> assert(false, "expected Short")
+end short_output_reports_the_bound
+
+// Inflating has no such figure to offer, because the length of what remains is exactly what a
+// compressed stream does not carry.
+@test("an output slice too small to inflate into answers Full, with no figure to give")
+short_output_on_inflate_is_full()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    var tiny: []u8 = [0; 8]
+
+    inflate(inflate_storage, packed[0..<n], tiny) match
+        Err(Full) -> assert(true)
+        _ -> assert(false, "expected Full")
+end short_output_on_inflate_is_full
+
+// The storage check is the one that would otherwise be a memory corruption rather than an error:
+// a slice smaller than the state is not something the C can be handed.
+@test("storage smaller than the state is refused, saying how much was wanted")
+too_little_storage_is_refused()
+    var tiny: []u8 = [0; 32]
+
+    deflater(tiny) match
+        Err(NoRoom(needed)) -> assert_eq(needed, DEFLATE_BYTES)
+        _ -> assert(false, "expected NoRoom from deflater")
+
+    inflater(tiny) match
+        Err(NoRoom(needed)) -> assert_eq(needed, INFLATE_BYTES)
+        _ -> assert(false, "expected NoRoom from inflater")
+end too_little_storage_is_refused
+
+// Bytes that are not a stream at all.
+@test("garbage is Corrupt rather than anything more optimistic")
+garbage_is_corrupt()
+    val garbage: []u8 = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33]
+    var out: []u8 = [0; 512]
+
+    inflate(inflate_storage, garbage, out) match
+        Err(Corrupt) -> assert(true)
+        _ -> assert(false, "expected Corrupt")
+end garbage_is_corrupt
+
+// A valid stream read as the wrong format. This is the mistake `Format` invites, so it gets a test:
+// the zlib wrapper's first bytes are not deflate data, and reading them as though they were is what
+// a caller who forgot the argument has done.
+@test("a wrapped stream inflated as raw is refused")
+wrapped_read_as_raw_is_refused()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    var out: []u8 = [0; 512]
+
+    inflate(inflate_storage, packed[0..<n], out, Format.Raw) match
+        Ok(_) -> assert(false, "a zlib stream should not inflate as raw")
+        Err(_) -> assert(true)
+end wrapped_read_as_raw_is_refused
+
+// **Half a download is not a corrupt one, and the difference matters to whatever is retrying.**
+@test("a stream cut short is Truncated rather than Corrupt")
+a_cut_stream_is_truncated()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    var out: []u8 = [0; 512]
+
+    inflate(inflate_storage, packed[0..<n / 2], out) match
+        Err(Truncated) -> assert(true)
+        _ -> assert(false, "expected Truncated")
+end a_cut_stream_is_truncated
+
+// **The pair is the point.** A stream that stopped and a stream that lied come back as two different
+// errors, and a caller retrying a download needs to know which it has -- so the companion to the
+// truncation test is one that corrupts a byte in place and leaves the length alone.
+@test("a stream whose bytes were altered is Corrupt rather than Truncated")
+altered_bytes_are_corrupt()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    // Past the two-byte zlib header, so the wrapper still parses and the failure is in the data.
+    packed[n / 2] ^= 0xFF
+
+    var out: []u8 = [0; 512]
+
+    inflate(inflate_storage, packed[0..<n], out) match
+        Err(Corrupt) -> assert(true)
+        Err(Truncated) -> assert(false, "altered bytes should not read as a short stream")
+        _ -> assert(false, "expected Corrupt")
+end altered_bytes_are_corrupt
+
+// -- The independent oracle, at the surface a program calls -------------------------------------------
+
+// The raw layer inflates these same 36 bytes; this does it through `inflate`, because agreement with
+// another implementation is a property of the package rather than of the declarations under it.
+//
+// They were produced by **zlib** from 4096 bytes of a seven-byte cycle. miniz compresses that input
+// to 36 bytes as well and to *different* 36 bytes -- same length, different header level bits and
+// different match choices -- which is why what is asserted here is what they decompress to, and never
+// what a compressor emits.
+@test("a stream another implementation produced inflates through the public surface")
+inflates_what_zlib_produced()
+    val packed: [36]u8 = [
+        0x78, 0xda, 0xed, 0xc5, 0x41, 0x11, 0x00, 0x30, 0x08, 0x00, 0xa0, 0xac,
+        0xea, 0xa6, 0xfd, 0x1b, 0xd8, 0xc3, 0x83, 0x0f, 0x91, 0xf5, 0x7e, 0x4f,
+        0x48, 0x92, 0x24, 0x49, 0x92, 0xa4, 0xbb, 0x2d, 0xde, 0x4c, 0x40, 0x58
+    ]
+
+    var out: []u8 = [0; 4096]
+
+    assert_eq(inflate(inflate_storage, packed, out).unwrap(), 4096)
+
+    for i in 0..<out.len
+        assert_eq(out[i], u8('a') + u8(i % 7))
+
+    assert_eq(crc32(out), 0x2882D524)
+end inflates_what_zlib_produced
+
+// -- Streaming -----------------------------------------------------------------------------------
+
+// **The device's shape**: the destination is whole and known, and the compressed data arrives in
+// pieces. Sixteen bytes at a time is smaller than anything real and is chosen to force back
+// references to reach across several chunks.
+@test("a stream inflates from chunks arriving one at a time")
+inflate_accepts_chunks()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    val n = deflate(deflate_storage, text.bytes, packed).unwrap()
+
+    var out: []u8 = [0; 512]
+    var i = inflater(inflate_storage).unwrap()
+
+    var at: usize = 0
+
+    while at < n
+        val end = if at + 16 < n then at + 16 else n
+        val more = end < n
+
+        i.push(packed[at..<end], out, more).unwrap()
+
+        at = end
+
+    assert(i.done)
+    assert_eq(i.written, text.bytes.len)
+
+    for k in 0..<i.written
+        assert_eq(out[k], text.bytes[k])
+end inflate_accepts_chunks
+
+// And the other direction, which is what a host packing a large file does: several pushes, then one
+// that says there is no more.
+@test("a compressor takes several chunks before being told to finish")
+deflate_accepts_chunks()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+
+    var d = deflater(deflate_storage).unwrap()
+
+    val half = text.bytes.len / 2
+
+    d.push(text.bytes[0..<half], packed, false).unwrap()
+
+    val step = d.push(text.bytes[half..], packed, true).unwrap()
+
+    assert(step.done)
+
+    var out: []u8 = [0; 512]
+
+    assert_eq(inflate(inflate_storage, packed[0..<d.written], out).unwrap(), text.bytes.len)
+
+    for k in 0..<text.bytes.len
+        assert_eq(out[k], text.bytes[k])
+end deflate_accepts_chunks
+
+// -- The checksums -------------------------------------------------------------------------------
+
+// The check vector every CRC-32 implementation is tested against, which makes this an assertion
+// about the standard rather than about miniz.
+@test("the checksums match the published vectors for \"123456789\"")
+checksums_match_the_vectors()
+    val s = "123456789"
+
+    assert_eq(crc32(s.bytes), 0xCBF43926)
+    assert_eq(adler32(s.bytes), 0x091E01DE)
+end checksums_match_the_vectors
