@@ -7,15 +7,15 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       miniz { git = "github.com/sysl-lang/miniz", version = "0.2.0" }
+//       miniz { git = "github.com/sysl-lang/miniz", version = "0.2.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.2.0` on this repository.
+// tag `v0.2.1` on this repository.
 
 package {
   name    = "miniz"
-  version = "0.2.0"
+  version = "0.2.1"
 }
 
 // **There is deliberately no `requires` block, though `requires {}` would be exact.**
@@ -33,7 +33,7 @@ package {
 // SDK's newlib, Zephyr and a FreeRTOS application -- see the README's "What is still hosted about
 // it".
 //
-// **The build options are the `defines` block below**, which needs sysl 0.0.64 or later. Until
+// **The build options are the `defines` block below**, which needs sysl 0.0.65 or later. Until
 // 0.1.1 they lived in an `options.h` that every translation unit included, because nothing supplied
 // a `-D` to a package's own C; the manifest now does, and the wrapper is gone with it.
 //
@@ -48,9 +48,9 @@ package {
 //
 // **Every one of these either deletes symbols or changes the size of a state struct this package
 // exports as a constant**, so the two C files and the `c const` block beside them have to agree.
-// Keying them to the files in one directory is what arranges that: a probe inherits the macros of
-// the carried C in its own directory, so the implementation, the shim and `c.sysl` cannot drift
-// apart.
+// Two things arrange that rather than one. The braced key gives both files **one** copy of the list,
+// so there is nothing to drift; and a `c const` block inherits the macros of the carried C in its
+// own directory, so the probe agrees with the objects without being named at all.
 //
 // `MINIZ_NO_MALLOC` is the one that makes this package what it is -- without it miniz's zlib-style
 // API allocates its own state and the caller-owned arrangement becomes one of two ways to do the
@@ -62,15 +62,7 @@ package {
 // header defines it unguarded, so the vendored copy carries an `#ifndef` around that line and it is
 // the only difference from the release tarball.
 defines {
-  "sh/sysl/miniz/c/miniz.c" {
-    MINIZ_NO_MALLOC       = true
-    MINIZ_NO_STDIO        = true
-    MINIZ_NO_ARCHIVE_APIS = true
-    MINIZ_NO_TIME         = true
-    TDEFL_LESS_MEMORY     = 1
-  }
-
-  "sh/sysl/miniz/c/shim.c" {
+  "sh/sysl/miniz/c/{miniz,shim}.c" {
     MINIZ_NO_MALLOC       = true
     MINIZ_NO_STDIO        = true
     MINIZ_NO_ARCHIVE_APIS = true

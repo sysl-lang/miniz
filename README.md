@@ -118,10 +118,19 @@ sh/sysl/miniz/
     tests.sysl      that sysl and clang agree about miniz
 ```
 
-**The options are a `defines` block in `package.hocon`**, which needs sysl 0.0.64 or later. Every one
-of them changes either the size of a state struct or which symbols exist, so the implementation, the
-shim and the probe sysl synthesises for a `c const` block have to agree — and they do by
-construction, because a probe inherits the macros of the carried C in its own directory.
+**The options are a `defines` block in `package.hocon`**, which needs sysl 0.0.65 or later:
+
+```hocon
+defines {
+  "sh/sysl/miniz/c/{miniz,shim}.c" { MINIZ_NO_MALLOC = true, … }
+}
+```
+
+Every one of them changes either the size of a state struct or which symbols exist, so the
+implementation, the shim and the probe sysl synthesises for a `c const` block have to agree. Two
+things arrange that. The braced key gives both C files **one** copy of the list, so there is nothing
+to drift; and a probe inherits the macros of the carried C in its own directory, so it agrees with
+the objects without being named at all.
 
 Until 0.1.1 they lived in an `options.h` that all three included, because nothing supplied a `-D` to
 a package's own C. The manifest does now, and the wrapper is gone with it.
