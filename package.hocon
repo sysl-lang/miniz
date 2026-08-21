@@ -7,15 +7,15 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       miniz { git = "github.com/sysl-lang/miniz", version = "0.1.0" }
+//       miniz { git = "github.com/sysl-lang/miniz", version = "0.1.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.1.0` on this repository.
+// tag `v0.1.1` on this repository.
 
 package {
   name    = "miniz"
-  version = "0.1.0"
+  version = "0.1.1"
 }
 
 // **There is deliberately no `requires` block, though `requires {}` would be exact.**
