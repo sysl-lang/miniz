@@ -35,7 +35,7 @@
 module sh.sysl.miniz
 
 import sh.sysl.miniz.c
-import sysl.slices.{as_ptr, as_mut_ptr}
+import sysl.slices.{as_ptr, as_mut_ptr, align_up}
 
 // ## Storage
 //
@@ -184,7 +184,7 @@ deflater(storage: []u8, level: Level = Level.Default,
              format: Format = Format.Zlib) -> Result[Deflater, Error]
     if storage.len < DEFLATE_BYTES then return Err(NoRoom(DEFLATE_BYTES))
 
-    val state: *c.Compressor = ptr_cast(c.align_up(as_mut_ptr(storage), c.COMPRESSOR_ALIGN))
+    val state: *c.Compressor = ptr_cast(align_up(as_mut_ptr(storage), c.COMPRESSOR_ALIGN))
 
     val wrapper = format match
         Zlib -> c.WRITE_ZLIB_HEADER
@@ -278,7 +278,7 @@ end Inflater
 inflater(storage: []u8, format: Format = Format.Zlib) -> Result[Inflater, Error]
     if storage.len < INFLATE_BYTES then return Err(NoRoom(INFLATE_BYTES))
 
-    val state: *c.Decompressor = ptr_cast(c.align_up(as_mut_ptr(storage), c.DECOMPRESSOR_ALIGN))
+    val state: *c.Decompressor = ptr_cast(align_up(as_mut_ptr(storage), c.DECOMPRESSOR_ALIGN))
 
     c.tinfl_init(state)
 

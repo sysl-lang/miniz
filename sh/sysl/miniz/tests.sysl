@@ -1,6 +1,9 @@
 module sh.sysl.miniz
 @tests
 
+import sh.sysl.miniz.c
+import sysl.slices.{as_ptr, is_aligned}
+
 // What a program sees, tested at the surface a program actually calls.
 //
 // The raw layer's tests beside this one check that sysl and clang agree about miniz. These check
@@ -156,6 +159,56 @@ too_little_storage_is_refused()
         Err(NoRoom(needed)) -> assert_eq(needed, INFLATE_BYTES)
         _ -> assert(false, "expected NoRoom from inflater")
 end too_little_storage_is_refused
+
+// -- Storage that does not start on a boundary ---------------------------------------------------
+
+// **The reason both byte counts are a `sizeof` plus seven**, asserted rather than trusted. Every
+// slice this package was handed while it was being written happened to be 8-aligned, so nothing here
+// would have failed had the placement been wrong -- which is exactly why the misaligned case is fed
+// deliberately.
+//
+// Both states hold pointers, so a state placed at an odd address is undefined behaviour -- and it is
+// the kind a host tolerates, which is why the **address** is what this asserts rather than the round
+// trip. Dropping the placement entirely and pointing the state at the raw slice still compresses and
+// still inflates on this machine; it would fault on a device, and a test that could not have failed
+// is not evidence.
+//
+// The slices below start one byte into module storage, which is 8-aligned, so their first address is
+// one past a boundary on any target.
+var offset_deflate_storage: [DEFLATE_BYTES + 8]u8 = [0; DEFLATE_BYTES + 8]
+var offset_inflate_storage: [INFLATE_BYTES + 8]u8 = [0; INFLATE_BYTES + 8]
+
+@test("a state is placed on a boundary inside storage that does not begin on one")
+a_state_is_aligned_inside_misaligned_storage()
+    val deflate_into = offset_deflate_storage[1..]
+    val inflate_into = offset_inflate_storage[1..]
+
+    assert(!is_aligned(as_ptr(deflate_into), c.COMPRESSOR_ALIGN), "the slice starts off a boundary")
+    assert(!is_aligned(as_ptr(inflate_into), c.DECOMPRESSOR_ALIGN))
+
+    val d = deflater(deflate_into).unwrap()
+    val i = inflater(inflate_into).unwrap()
+
+    assert(is_aligned(d.state, c.COMPRESSOR_ALIGN), "the compressor is not")
+    assert(is_aligned(i.state, c.DECOMPRESSOR_ALIGN), "and neither is the decompressor")
+end a_state_is_aligned_inside_misaligned_storage
+
+// And the placement does not cost the stream anything, which the round trip through the same
+// misaligned storage says.
+@test("misaligned storage round trips like any other")
+misaligned_storage_still_round_trips()
+    val text = sample()
+    var packed: []u8 = [0; 512]
+    var out: []u8 = [0; 256]
+
+    val n = deflate(offset_deflate_storage[1..], text.bytes, packed).unwrap()
+    val m = inflate(offset_inflate_storage[1..], packed[0..<n], out).unwrap()
+
+    assert_eq(m, text.bytes.len)
+
+    for k in 0..<m
+        assert_eq(out[k], text.bytes[k])
+end misaligned_storage_still_round_trips
 
 // Bytes that are not a stream at all.
 @test("garbage is Corrupt rather than anything more optimistic")

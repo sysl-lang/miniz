@@ -7,15 +7,24 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       miniz { git = "github.com/sysl-lang/miniz", version = "0.2.1" }
+//       miniz { git = "github.com/sysl-lang/miniz", version = "0.2.2" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.2.1` on this repository.
+// tag `v0.2.2` on this repository.
 
 package {
   name    = "miniz"
-  version = "0.2.1"
+  version = "0.2.2"
+
+  // **The floor is `sysl.slices.align_up`**, which is what 0.2.2 is: the two alignment helpers this
+  // package carried in C are the standard library's now, written in sysl. They ship in 0.0.81 --
+  // card `0267` -- so no earlier compiler can build this.
+  //
+  // The floor was 0.0.65 until then, for the `defines` block below, and it was stated in prose
+  // rather than here. It is a key now so that an older compiler is refused rather than failing on a
+  // name it has never heard of.
+  sysl = "0.0.81"
 }
 
 // **There is deliberately no `requires` block, though `requires {}` would be exact.**
@@ -35,7 +44,8 @@ package {
 //
 // **The build options are the `defines` block below**, which needs sysl 0.0.65 or later. Until
 // 0.1.1 they lived in an `options.h` that every translation unit included, because nothing supplied
-// a `-D` to a package's own C; the manifest now does, and the wrapper is gone with it.
+// a `-D` to a package's own C; the manifest now does, and the wrapper is gone with it. The `sysl`
+// key above states a later floor than 0.0.65 for a different reason, given there.
 //
 // The raw layer's tests assert the state sizes those options produce, so a setting that stopped
 // applying fails a test rather than costing 151,552 bytes of somebody's SRAM.

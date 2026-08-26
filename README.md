@@ -145,17 +145,27 @@ signature disagreeing with the header links perfectly and corrupts the call at r
 above it has to be **pleasant**, which is a different question that would otherwise get answered in
 the same breath.
 
-**Three things need the shim.** `tinfl_init` and `tinfl_get_adler32` are macros rather than
-functions, so there is no symbol to link; and alignment has to be computed in C, because sysl has no
-pointer-to-integer cast. That last one is why the exported byte counts are a `sizeof` plus seven: a
-state holds pointers, a `[]u8` promises nothing about its address, so the state is placed at the
+**Two things need the shim.** `tinfl_init` and `tinfl_get_adler32` are macros rather than functions,
+so there is no symbol to link. Every other function in the deflate and inflate surface is declared
+straight out of `c.sysl`.
+
+There were three until 0.2.2, and the third is worth recording rather than quietly dropping: the
+alignment arithmetic was written in C on the stated grounds that *sysl has no pointer-to-integer
+cast*. **It has had one since v0.0.10** — `usize(p)` is an ordinary conversion, total and lossless,
+`ptr_cast` reads an address back, and `alignof(T)` gives the boundary. The claim was wrong the day it
+was written rather than made wrong by anything since, and it is the reason to probe a package
+comment before repeating it as a language limit. The two functions are `sysl.slices.align_up` and
+`sysl.slices.is_aligned` now, written in sysl.
+
+What they are for has not changed, and it is why the exported byte counts are a `sizeof` plus seven:
+a state holds pointers, a `[]u8` promises nothing about its address, so the state is placed at the
 first aligned offset inside whatever slice it is given rather than trusting that the slice was
 aligned. Every one observed while writing this package happened to be — which is not the same as
-being guaranteed one.
+being guaranteed one, and the suite now feeds a deliberately misaligned slice to say so.
 
 ## Tests
 
-`sysl test .` — 25 tests, both layers.
+`sysl test .` — 27 tests, both layers.
 
 The one worth knowing about: miniz round-tripping its own output proves the binding is
 self-consistent, not that it is *right*. So the suite also inflates 36 bytes **zlib** produced from

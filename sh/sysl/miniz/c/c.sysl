@@ -1,17 +1,20 @@
-// miniz as C declares it: the deflate and inflate surface, the three shim functions, and the numbers
+// miniz as C declares it: the deflate and inflate surface, the two shim functions, and the numbers
 // its header holds.
 //
 // **Everything that is C lives in this directory** -- `miniz.c` and `miniz.h` as they come from
-// upstream but for the build options described below, the `shim.c` answering for the three things
+// upstream but for the one line of the header noted below, the `shim.c` answering for the two macros
 // sysl cannot reach, and this file of declarations over them. Nothing here is meant to be called by a
 // program: a state is a slab of caller memory, a failure is a negative integer, and a length crosses
 // through a pointer. The module above turns those into `Deflater`, `Inflater` and a `Result`.
 //
-// **The build options are set in the vendored `miniz.h` and nowhere else, because there is nowhere
-// else.** sysl compiles a package's C declaratively and runs no build script, so no `-D` reaches this
-// translation unit -- and miniz's header would defeat one anyway, since it defines
-// `TDEFL_LESS_MEMORY` unguarded. Both readers of the header therefore agree by construction, which is
-// the trap termbox2's `TB_OPT_ATTR_W` is.
+// **The build options are the `defines` block in `package.hocon`**, which is where a reader looks for
+// a package's configuration. This paragraph said they were set in the vendored header "because there
+// is nowhere else", which was true when the file was written and stopped being true at sysl 0.0.64.
+// The one exception is `TDEFL_LESS_MEMORY`, which miniz's header defines unguarded so that no `-D`
+// survives -- the vendored copy carries an `#ifndef` around that line and it is the only difference
+// from the release tarball. A `c const` block inherits the macros of the carried C in its own
+// directory, so the sizes below agree with the objects by construction, which is the trap termbox2's
+// `TB_OPT_ATTR_W` is.
 
 module sh.sysl.miniz.c
 
@@ -91,10 +94,13 @@ extern "sysl_miniz_tinfl_get_adler32" tinfl_get_adler32(r: *Decompressor) -> uin
 extern "mz_crc32" crc32(crc: ulong, buf: *u8, len: usize) -> ulong
 extern "mz_adler32" adler32(adler: ulong, buf: *u8, len: usize) -> ulong
 
-// ## Alignment
+// ## Alignment, which is no longer here
 //
-// The first address at or after `p` that `alignment` divides. sysl has no pointer-to-integer cast, so
-// both of these are asked in C.
-extern "sysl_miniz_align" align_up(p: *u8, alignment: usize) -> *u8
-
-extern "sysl_miniz_is_aligned" is_aligned(p: *u8, alignment: usize) -> bool
+// This file carried an `align_up` and an `is_aligned` over two C helpers until miniz 0.2.2, on the
+// stated grounds that *"sysl has no pointer-to-integer cast"*. **That was never true.** `usize(p)` is
+// an ordinary conversion, total and lossless, and has been since v0.0.10; `ptr_cast` reads an address
+// back and `alignof(T)` supplies the boundary. The claim was wrong the day it was written rather than
+// made wrong by anything since.
+//
+// Both functions are `sysl.slices.align_up` and `sysl.slices.is_aligned` now, written in sysl, and
+// the module above imports them like any other library function.
