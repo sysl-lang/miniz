@@ -24,8 +24,8 @@ module sh.sysl.miniz.c
 // ## The sizes, asked for rather than transcribed
 //
 // Both state structs are caller-owned, so their sizes are interface rather than implementation detail
-// -- and both move with the build options set in the vendored header, which is exactly why nothing
-// here writes a number down.
+// -- and both move with the build options above, which is exactly why nothing here writes a number
+// down.
 c const
     COMPRESSOR_SIZE:    usize = "sizeof(tdefl_compressor)"
     COMPRESSOR_ALIGN:   usize = "_Alignof(tdefl_compressor)"
