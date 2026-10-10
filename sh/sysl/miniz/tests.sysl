@@ -50,16 +50,16 @@ end bound_exceeds_its_input
 @test("text compresses and comes back exactly")
 text_round_trips()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
     // It is text; it had better have got smaller.
     assert(n < text.bytes.len)
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
-    val m = inflate(inflate_storage, packed[0..<n], out).unwrap()
+    val m =inflate(inflate_storage, packed[0..<n], out).unwrap()
 
     assert_eq(m, text.bytes.len)
 
@@ -72,13 +72,13 @@ end text_round_trips
 @test("empty input round trips through a stream that is not itself empty")
 empty_round_trips()
     val nothing: []u8 = []
-    var packed: []u8 = [0; 64]
+    val packed: []u8 = [0; 64]
 
     val n = deflate(deflate_storage, nothing, packed).unwrap()
 
     assert(n > 0)
 
-    var out: []u8 = [0; 64]
+    val out: []u8 = [0; 64]
 
     assert_eq(inflate(inflate_storage, packed[0..<n], out).unwrap(), 0)
 end empty_round_trips
@@ -88,15 +88,15 @@ end empty_round_trips
 @test("raw deflate is shorter than the wrapped form and round trips on its own terms")
 raw_round_trips()
     val text = sample()
-    var wrapped: []u8 = [0; 512]
-    var raw: []u8 = [0; 512]
+    val wrapped: []u8 = [0; 512]
+    val raw: []u8 = [0; 512]
 
     val w = deflate(deflate_storage, text.bytes, wrapped).unwrap()
     val r = deflate(deflate_storage, text.bytes, raw, Level.Default, Format.Raw).unwrap()
 
     assert_eq(w, r + 6)
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     assert_eq(inflate(inflate_storage, raw[0..<r], out, Format.Raw).unwrap(), text.bytes.len)
 end raw_round_trips
@@ -106,8 +106,8 @@ end raw_round_trips
 @test("a higher level compresses at least as well as a lower one")
 levels_order_by_size()
     val text = sample()
-    var fastest: []u8 = [0; 512]
-    var best: []u8 = [0; 512]
+    val fastest: []u8 = [0; 512]
+    val best: []u8 = [0; 512]
 
     val f = deflate(deflate_storage, text.bytes, fastest, Level.Fastest).unwrap()
     val b = deflate(deflate_storage, text.bytes, best, Level.Best).unwrap()
@@ -122,7 +122,7 @@ end levels_order_by_size
 @test("an output slice too small to compress into answers Short, carrying the bound")
 short_output_reports_the_bound()
     val text = sample()
-    var tiny: []u8 = [0; 8]
+    val tiny: []u8 = [0; 8]
 
     deflate(deflate_storage, text.bytes, tiny) match
         Err(Short(needed)) -> assert_eq(needed, bound(text.bytes.len))
@@ -134,11 +134,11 @@ end short_output_reports_the_bound
 @test("an output slice too small to inflate into answers Full, with no figure to give")
 short_output_on_inflate_is_full()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
-    var tiny: []u8 = [0; 8]
+    val tiny: []u8 = [0; 8]
 
     inflate(inflate_storage, packed[0..<n], tiny) match
         Err(Full) -> assert(true)
@@ -149,7 +149,7 @@ end short_output_on_inflate_is_full
 // a slice smaller than the state is not something the C can be handed.
 @test("storage smaller than the state is refused, saying how much was wanted")
 too_little_storage_is_refused()
-    var tiny: []u8 = [0; 32]
+    val tiny: []u8 = [0; 32]
 
     deflater(tiny) match
         Err(NoRoom(needed)) -> assert_eq(needed, DEFLATE_BYTES)
@@ -198,8 +198,8 @@ end a_state_is_aligned_inside_misaligned_storage
 @test("misaligned storage round trips like any other")
 misaligned_storage_still_round_trips()
     val text = sample()
-    var packed: []u8 = [0; 512]
-    var out: []u8 = [0; 256]
+    val packed: []u8 = [0; 512]
+    val out: []u8 = [0; 256]
 
     val n = deflate(offset_deflate_storage[1..], text.bytes, packed).unwrap()
     val m = inflate(offset_inflate_storage[1..], packed[0..<n], out).unwrap()
@@ -214,7 +214,7 @@ end misaligned_storage_still_round_trips
 @test("garbage is Corrupt rather than anything more optimistic")
 garbage_is_corrupt()
     val garbage: []u8 = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33]
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     inflate(inflate_storage, garbage, out) match
         Err(Corrupt) -> assert(true)
@@ -227,11 +227,11 @@ end garbage_is_corrupt
 @test("a wrapped stream inflated as raw is refused")
 wrapped_read_as_raw_is_refused()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     inflate(inflate_storage, packed[0..<n], out, Format.Raw) match
         Ok(_) -> assert(false, "a zlib stream should not inflate as raw")
@@ -242,11 +242,11 @@ end wrapped_read_as_raw_is_refused
 @test("a stream cut short is Truncated rather than Corrupt")
 a_cut_stream_is_truncated()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     inflate(inflate_storage, packed[0..<n / 2], out) match
         Err(Truncated) -> assert(true)
@@ -259,14 +259,14 @@ end a_cut_stream_is_truncated
 @test("a stream whose bytes were altered is Corrupt rather than Truncated")
 altered_bytes_are_corrupt()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
     // Past the two-byte zlib header, so the wrapper still parses and the failure is in the data.
     packed[n / 2] ^= 0xFF
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     inflate(inflate_storage, packed[0..<n], out) match
         Err(Corrupt) -> assert(true)
@@ -291,7 +291,7 @@ inflates_what_zlib_produced()
         0x48, 0x92, 0x24, 0x49, 0x92, 0xa4, 0xbb, 0x2d, 0xde, 0x4c, 0x40, 0x58
     ]
 
-    var out: []u8 = [0; 4096]
+    val out: []u8 = [0; 4096]
 
     assert_eq(inflate(inflate_storage, packed, out).unwrap(), 4096)
 
@@ -309,12 +309,12 @@ end inflates_what_zlib_produced
 @test("a stream inflates from chunks arriving one at a time")
 inflate_accepts_chunks()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
     val n = deflate(deflate_storage, text.bytes, packed).unwrap()
 
-    var out: []u8 = [0; 512]
-    var i = inflater(inflate_storage).unwrap()
+    val out: []u8 = [0; 512]
+    var i =inflater(inflate_storage).unwrap()
 
     var at: usize = 0
 
@@ -338,9 +338,9 @@ end inflate_accepts_chunks
 @test("a compressor takes several chunks before being told to finish")
 deflate_accepts_chunks()
     val text = sample()
-    var packed: []u8 = [0; 512]
+    val packed: []u8 = [0; 512]
 
-    var d = deflater(deflate_storage).unwrap()
+    var d =deflater(deflate_storage).unwrap()
 
     val half = text.bytes.len / 2
 
@@ -350,7 +350,7 @@ deflate_accepts_chunks()
 
     assert(step.done)
 
-    var out: []u8 = [0; 512]
+    val out: []u8 = [0; 512]
 
     assert_eq(inflate(inflate_storage, packed[0..<d.written], out).unwrap(), text.bytes.len)
 
