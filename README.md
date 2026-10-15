@@ -3,6 +3,8 @@
 Deflate and inflate for sysl, bound to [miniz](https://github.com/richgel999/miniz) — with no
 allocator anywhere, including for the compressor's own working state.
 
+*An independent sysl package for miniz. It is not affiliated with or endorsed by miniz's authors or trademark holders.*
+
 ```sysl
 import sh.sysl.miniz.{DEFLATE_BYTES, INFLATE_BYTES, deflate, inflate, bound}
 
