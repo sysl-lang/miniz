@@ -1,0 +1,336 @@
+// Inflating a stream whose size nobody knows: chunks in, chunks out.
+//
+// `Inflater` beside this is the device's shape -- the destination is one slice, known and whole, and
+// only the input arrives in pieces. A response body is the other shape. Its length is whatever the
+// server sends, it may be gzip rather than zlib, and the program wants the decoded bytes as they come
+// rather than after the last packet. A `Decoder` is that:
+//
+//     val d = decoder()
+//     var body: Buf[u8] = buf()
+//
+//     for chunk in chunks do d.feed(chunk, body)?
+//
+//     d.finish()?
+//
+// **It holds its own memory**, which is the one place this package allocates. inflate resolves a back
+// reference by reading up to 32 KB behind the current position, and when the output leaves in pieces
+// that history has to be kept somewhere -- miniz's answer is a 32 KB ring it writes into and wraps
+// around, and the ring and the decompressor's state are both on the heap, owned by the `Decoder` and
+// returned with it. Neither is a C allocation, so there is no destructor: nothing outside the
+// language's own counting has to be handed back.
+//
+// ## gzip is parsed here, because miniz does not
+//
+// miniz reads raw deflate and the zlib wrapper. gzip (RFC 1952) is a header of ten bytes and four
+// optional fields, a raw deflate stream, and an eight-byte trailer carrying the CRC-32 and the length
+// of what it decompresses to -- so the header is walked here one byte at a time, which is what lets it
+// arrive split anywhere, and the trailer is checked against a CRC kept over the output as it leaves.
+//
+// ## What follows the end of a stream is an error
+//
+// A byte after the last one the stream needed is `Trailing`, from `feed` and from the whole-buffer
+// `inflate` alike. Ignoring it would be the quiet choice and the wrong one: `cat a.gz b.gz` is a valid
+// gzip file of two members, and a decoder that stopped after the first and said nothing would hand
+// back half the data as though it were all of it. Reading further members is not done here; refusing
+// them is what keeps that from being silent.
+
+module sh.sysl.miniz
+
+import sh.sysl.miniz.c
+import sysl.slices.{as_ptr, as_mut_ptr, align_up}
+import sysl.buf.Buf
+
+// What a `Decoder` expects to be reading.
+enum Wrapper
+    // Bare deflate, with no header and no checksum.
+    Raw
+
+    // A two-byte zlib header, deflate, and an Adler-32 of the output (RFC 1950).
+    Zlib
+
+    // A gzip member: a header, deflate, and a CRC-32 and length of the output (RFC 1952).
+    Gzip
+
+    // zlib or gzip, decided by the first byte, which is what zlib's `windowBits = 15 + 32` does. A
+    // gzip stream opens with `1f`, and a zlib header can never begin with it -- its low nibble names
+    // the method, and fifteen is not deflate -- so one byte is enough to decide on.
+    Detect
+end Wrapper
+
+// The FLG bits of a gzip header.
+private const FHCRC: u8 = 0x02
+private const FEXTRA: u8 = 0x04
+private const FNAME: u8 = 0x08
+private const FCOMMENT: u8 = 0x10
+
+// The three bits RFC 1952 reserves, which a decoder "must give an error indication" on seeing set.
+private const FRESERVED: u8 = 0xE0
+
+// Where in the stream the next byte belongs.
+private enum Phase
+    // The wrapper is still to be decided from the first byte.
+    Detect
+
+    // The gzip header's ten fixed bytes.
+    Fixed
+
+    // FEXTRA's two-byte length, then the bytes it counts.
+    ExtraLen
+    Extra
+
+    // FNAME and FCOMMENT, each ending at a zero byte.
+    Name
+    Comment
+
+    // FHCRC: the low sixteen bits of the CRC-32 of every header byte before it.
+    HeaderCrc
+
+    // The deflate data, and for zlib its wrapper, which miniz reads itself.
+    Body
+
+    // gzip's CRC-32 and ISIZE.
+    Trailer
+
+    Done
+end Phase
+
+// Which optional field comes next, after each one that may be present. The chain is the order the
+// RFC lays them out in, and a flag that is clear skips its field.
+private after_fixed(flags: u8) -> Phase = if flags & FEXTRA != 0 then ExtraLen else after_extra(flags)
+private after_extra(flags: u8) -> Phase = if flags & FNAME != 0 then Name else after_name(flags)
+private after_name(flags: u8) -> Phase = if flags & FCOMMENT != 0 then Comment else after_comment(flags)
+private after_comment(flags: u8) -> Phase = if flags & FHCRC != 0 then HeaderCrc else Body
+
+// A streaming inflater that owns its memory. Make one with `decoder`.
+struct Decoder
+    // The decompressor's state, placed at an aligned offset inside `storage`.
+    private state: *c.Decompressor
+    private storage: []u8
+
+    // The last 32 KB of output, which miniz writes into as a ring and reads back references from.
+    private ring: []u8
+    private ring_at: usize
+
+    private phase: Phase
+    private zlib: bool
+    private gzip: bool
+
+    // The header's FLG byte, and how far into the current field the header has got.
+    private flags: u8
+    private seen: usize
+
+    // A two-byte little-endian number being read: FEXTRA's length, which the bytes after it are
+    // counted against, or the FHCRC.
+    private number: usize
+
+    // The CRC-32 of the header so far, for FHCRC.
+    private header_crc: u32
+
+    // The CRC-32 and the length, modulo 2^32, of the output so far, for the gzip trailer.
+    private crc: u32
+    private size: u32
+
+    private trailer: [8]u8
+
+    // The first error, which every later call answers too: a stream that has gone wrong once does not
+    // become right by being fed more.
+    private broken: Option[Error]
+
+    // Whether the end of the stream has been reached, trailer and all.
+    is_done(self) -> bool = self.phase == Phase.Done
+
+    // Decode another chunk of the stream, appending what it produces to `out`, and answer how many
+    // bytes were appended.
+    //
+    // A chunk may end anywhere -- in the gzip header, in the middle of a Huffman code, in the
+    // trailer -- and a chunk of any size may produce nothing at all or a great deal: a few hundred
+    // bytes of deflate can stand for megabytes, and all of it is appended before this returns.
+    //
+    // A byte past the end of the stream is `Trailing`. Whatever the chunk produced before that point
+    // is already in `out`.
+    feed(*self, chunk: []const u8, out: Buf[u8]) -> Result[usize, Error]
+        if self.broken is Some(e) then return Err(e)
+
+        val before = out.len()
+
+        self.take(chunk, out) match
+            Ok(_) -> Ok(out.len() - before)
+            Err(e) ->
+                self.broken = Some(e)
+                Err(e)
+    end feed
+
+    // Say that the stream has no more chunks. A stream that stopped short of its end is `Truncated`,
+    // which is what a dropped connection looks like.
+    finish(self) -> Result[unit, Error]
+        if self.broken is Some(e) then return Err(e)
+
+        if self.phase != Phase.Done then return Err(Truncated)
+
+        Ok(())
+    end finish
+
+    private take(*self, chunk: []const u8, out: Buf[u8]) -> Result[unit, Error]
+        var at: usize = 0
+
+        while at < chunk.len
+            self.phase match
+                Done -> return Err(Trailing)
+
+                Body -> at += self.inflate_some(chunk[at..], out)?
+
+                Trailer ->
+                    self.trailer[self.seen] = chunk[at]
+                    self.seen += 1
+                    at += 1
+
+                    if self.seen == 8 then self.check_trailer()?
+
+                Detect ->
+                    self.gzip = chunk[at] == 0x1F
+                    self.zlib = !self.gzip
+                    self.phase = if self.gzip then Phase.Fixed else Phase.Body
+
+                _ ->
+                    self.header_byte(chunk[at])?
+                    at += 1
+
+        Ok(())
+    end take
+
+    // One byte of the gzip header.
+    private header_byte(*self, b: u8) -> Result[unit, Error]
+        if self.phase != Phase.HeaderCrc then self.header_crc = crc_of_byte(self.header_crc, b)
+
+        val n = self.seen
+
+        self.seen += 1
+
+        self.phase match
+            Fixed ->
+                if n == 0 && b != 0x1F then return Err(BadHeader)
+                if n == 1 && b != 0x8B then return Err(BadHeader)
+
+                // CM: 8 is deflate, and the only method the RFC defines.
+                if n == 2 && b != 8 then return Err(BadHeader)
+
+                if n == 3
+                    if b & FRESERVED != 0 then return Err(BadHeader)
+
+                    self.flags = b
+
+                // MTIME, XFL and OS are read past: nothing here has a use for them.
+                if n == 9 then self.next(after_fixed(self.flags))
+
+            ExtraLen ->
+                self.number = if n == 0 then usize(b) else self.number | usize(b) << 8
+
+                if n == 1
+                    if self.number == 0 then self.next(after_extra(self.flags))
+                    else self.next(Phase.Extra)
+
+            Extra -> if self.seen == self.number then self.next(after_extra(self.flags))
+
+            Name -> if b == 0 then self.next(after_name(self.flags))
+
+            Comment -> if b == 0 then self.next(after_comment(self.flags))
+
+            HeaderCrc ->
+                self.number = if n == 0 then usize(b) else self.number | usize(b) << 8
+
+                if n == 1
+                    if u32(self.number) != (self.header_crc & 0xFFFF) then return Err(BadHeader)
+
+                    self.next(Phase.Body)
+
+            _ -> ()
+
+        Ok(())
+    end header_byte
+
+    private next(*self, phase: Phase)
+        self.phase = phase
+        self.seen = 0
+
+    // Run miniz over `src` until it has taken all of it or reached the end of the deflate data,
+    // appending every byte it writes to `out`, and answer how much of `src` it took.
+    //
+    // **`HAS_MORE_INPUT` is always passed.** It is what tells miniz that the end of this chunk is not
+    // the end of the stream, so it waits for the next one rather than reading zeros past the end of
+    // this. Only `finish` knows the stream is over, and it needs nothing from miniz to say so: a valid
+    // stream reaches its end on the bytes it is made of, and miniz takes no byte it does not need.
+    private inflate_some(*self, src: []const u8, out: Buf[u8]) -> Result[usize, Error]
+        var at: usize = 0
+
+        var flags = c.HAS_MORE_INPUT
+
+        if self.zlib then flags |= c.PARSE_ZLIB_HEADER
+
+        loop
+            var in_len: usize = src.len - at
+            var out_len: usize = self.ring.len - self.ring_at
+
+            val status = c.tinfl_decompress(self.state, as_ptr(src[at..]), &in_len,
+                                            as_mut_ptr(self.ring), as_mut_ptr(self.ring[self.ring_at..]),
+                                            &out_len, flags)
+
+            at += in_len
+
+            if out_len > 0
+                val produced = self.ring[self.ring_at..<(self.ring_at + out_len)]
+
+                out.extend(produced)
+
+                if self.gzip
+                    self.crc = u32(c.crc32(ulong(self.crc), as_ptr(produced), out_len))
+                    self.size += u32(out_len & 0xFFFFFFFF)
+
+                self.ring_at = (self.ring_at + out_len) & (self.ring.len - 1)
+
+            if status == c.INFL_DONE
+                self.next(if self.gzip then Phase.Trailer else Phase.Done)
+
+                return Ok(at)
+
+            // The ring filled before the input ran out: what it held has been copied out, so go round.
+            if status == c.INFL_HAS_MORE_OUTPUT then continue
+
+            if status == c.INFL_NEEDS_MORE_INPUT then return Ok(at)
+
+            return Err(Corrupt)
+    end inflate_some
+
+    private check_trailer(*self) -> Result[unit, Error]
+        if le32(self.trailer, 0) != self.crc then return Err(BadCrc)
+
+        if le32(self.trailer, 4) != self.size then return Err(BadLength)
+
+        self.next(Phase.Done)
+
+        Ok(())
+    end check_trailer
+end Decoder
+
+private le32(b: [8]u8, at: usize) -> u32 =
+    u32(b[at]) | u32(b[at + 1]) << 8 | u32(b[at + 2]) << 16 | u32(b[at + 3]) << 24
+
+private crc_of_byte(crc: u32, b: u8) -> u32
+    val one: [1]u8 = [b]
+
+    u32(c.crc32(ulong(crc), as_ptr(one), 1))
+
+// A decoder for `wrapper`, which by default decides between zlib and gzip from the first byte.
+decoder(wrapper: Wrapper = Wrapper.Detect) -> &Decoder
+    val storage: []u8 = [0; INFLATE_BYTES]
+    val state: *c.Decompressor = ptr_cast(align_up(as_mut_ptr(storage), c.DECOMPRESSOR_ALIGN))
+
+    c.tinfl_init(state)
+
+    val phase = wrapper match
+        Detect -> Phase.Detect
+        Gzip   -> Phase.Fixed
+        _      -> Phase.Body
+
+    Decoder(state, storage, [0; c.LZ_DICT_SIZE], 0, phase, wrapper == Wrapper.Zlib,
+            wrapper == Wrapper.Gzip, 0, 0, 0, 0, 0, 0, [0; 8], None)
+end decoder

@@ -86,7 +86,7 @@ enum Format
 end Format
 
 // Why a compress or an inflate did not finish.
-enum Error
+enum Error derives Eq
     // The output slice cannot hold the answer. **`needed` is a ceiling rather than the exact figure**
     // -- unlike qoi, miniz cannot say what it would really have taken, so this is `bound(src.len)`,
     // which is what a caller should have sized the buffer to in the first place.
@@ -107,6 +107,21 @@ enum Error
 
     // The storage slice is smaller than `DEFLATE_BYTES` or `INFLATE_BYTES`. `needed` is which.
     NoRoom(needed: usize)
+
+    // There are bytes after the end of the stream. A stream says where it ends, so these are not part
+    // of it -- and the commonest way to have them is a second gzip member, which nothing here reads,
+    // so answering the first one's data as the whole would lose the rest without a word.
+    Trailing
+
+    // A gzip header that is not one: the wrong magic number, a method other than deflate, a reserved
+    // flag set, or an FHCRC that does not match the header it covers.
+    BadHeader
+
+    // A gzip trailer's CRC-32 is not the CRC-32 of what the stream decompressed to.
+    BadCrc
+
+    // A gzip trailer's ISIZE is not the length, modulo 2^32, of what the stream decompressed to.
+    BadLength
 end Error
 
 // How far a single step got. Both fields count bytes of this call, not of the stream.
@@ -290,11 +305,16 @@ end inflater
 // `dst` has to be large enough for all of it. A compressed stream does not say how large that is, so
 // the size has to come from somewhere else -- a header of your own, or the fixed size of the thing
 // being unpacked. `Full` is what a `dst` that was too small looks like.
+//
+// **`src` has to be exactly one stream.** Bytes after its end are `Trailing`, as they are from a
+// `Decoder` -- see `stream.sysl` for why that is an error rather than something to skip.
 inflate(storage: []u8, src: []const u8, dst: []u8,
             format: Format = Format.Zlib) -> Result[usize, Error]
     var i = inflater(storage, format)?
 
-    i.push(src, dst, false)?
+    val step = i.push(src, dst, false)?
+
+    if step.consumed < src.len then return Err(Trailing)
 
     Ok(i.written)
 end inflate

@@ -18,6 +18,10 @@ Everything is a caller-supplied slice: the input, the output, and the state the 
 is what makes the package usable where there is no heap, and it is also what makes its shape unusual
 — a `Deflater` is not something you create, it is something you *place* in storage you already have.
 
+**The one exception is `Decoder`**, for a stream whose length nobody knows — an HTTP body, gzip or
+zlib, decoded as it arrives. It keeps the last 32 KB of output to resolve back references against,
+and it owns that memory itself. A program that never makes one allocates nothing.
+
 ## The two halves are not the same size
 
 This is the most useful thing to know about the library, and it decides how a project should be
@@ -43,6 +47,7 @@ which trades slightly worse ratios for 151,552 fewer bytes; without it the state
 | `inflate(work, src, dst, format)` | one call, answers bytes written |
 | `deflater(work, …)` / `Deflater.push(src, dst, finish)` | feed input in chunks |
 | `inflater(work, …)` / `Inflater.push(src, dst, more)` | take the compressed stream in chunks |
+| `decoder(wrapper)` / `Decoder.feed(chunk, out)` / `.finish()` | chunks in, chunks out — raw, zlib or gzip, or detected |
 | `bound(len)` | the largest a compressed stream can be |
 | `crc32(bytes)` / `adler32(bytes)` | useful without compressing anything |
 
@@ -72,6 +77,36 @@ assert(inf.done)
 Passing `more` while further chunks are expected is what turns "waiting for input" into a
 `Truncated` on the last one.
 
+### A stream of unknown length: `Decoder`
+
+A response body is the other way round from a firmware update: nothing says how large the answer is,
+it may be gzip rather than zlib, and the program wants the decoded bytes as they come rather than
+after the last packet. A `Decoder` appends what each chunk produces to a `Buf[u8]` of yours and
+answers how many bytes that was:
+
+```sysl
+val d = decoder()
+var body: Buf[u8] = buf()
+
+for chunk in chunks do d.feed(chunk, body)?
+
+d.finish()?
+```
+
+- **`Wrapper`** is `Raw`, `Zlib`, `Gzip`, or `Detect` (the default), which tells zlib from gzip by
+  the first byte, as zlib's `windowBits = 15 + 32` does.
+- **A chunk may end anywhere**: inside the gzip header, in the middle of a Huffman code, between the
+  two halves of the trailer. Every split of every test stream is checked to decode identically, from
+  one byte at a time to the whole thing at once.
+- **gzip is parsed here, not by miniz**, which reads only raw deflate and zlib. The header's optional
+  fields (FEXTRA, FNAME, FCOMMENT) are read past, FHCRC is checked when it is present, and the
+  trailer's CRC-32 and ISIZE are compared with what was actually decoded.
+- **`finish` is what turns a stream that stopped into `Truncated`.** `feed` cannot know, since more
+  might come.
+- **An error sticks**: every later `feed` and `finish` answers it again.
+- It is a `&Decoder`, and its memory goes with the last reference to it. Nothing in it is a C
+  allocation, so there is no destructor and nothing to close.
+
 ## What the errors say
 
 A binding earns its keep here, because miniz reports a short output buffer and a corrupt stream as
@@ -84,6 +119,17 @@ two negative integers a caller has to know apart.
 | `Truncated` | the input stopped mid-stream. **Half a download, not a corrupt one** — the difference matters to whatever is retrying |
 | `Corrupt` | not a valid stream, or the wrapper's checksum disagreed with the data |
 | `NoRoom(needed)` | the storage slice is smaller than `DEFLATE_BYTES` or `INFLATE_BYTES` |
+| `Trailing` | bytes after the end of the stream — from `inflate` and from a `Decoder` alike |
+| `BadHeader` | a gzip header that is not one: wrong magic, a method other than deflate, a reserved flag, or an FHCRC that disagrees |
+| `BadCrc` / `BadLength` | a gzip trailer's CRC-32 or ISIZE disagrees with what was decoded |
+
+**Bytes after the end are an error, not something to skip.** The ordinary way to have them is a
+second gzip member — `cat a.gz b.gz` is a valid gzip file — and a decoder that stopped after the
+first and said nothing would hand back half the data as though it were all of it. Further members
+are not read; refusing them is what keeps that from being silent. Before 0.3.0 `inflate` ignored
+them.
+
+`Error` derives `Eq`, so a result can be compared with `==`.
 
 `Truncated` and `Corrupt` are genuinely distinguished, and each has a test that would fail if the
 other were returned.
@@ -91,7 +137,8 @@ other were returned.
 ## What is still hosted about it
 
 The package asks nothing of sysl — no allocator, no clock, no file, no operating system — and
-`requires {}` would be exact. **That is not the same as compiling for a bare target, and the two get
+`requires {}` would be exact, but for `Decoder`, which allocates its ring and state and costs nothing
+to a program that does not make one. **That is not the same as compiling for a bare target, and the two get
 conflated constantly.**
 
 `miniz.h` includes `<assert.h>`, `<stdlib.h>` and `<string.h>` unconditionally. clang gives a
@@ -111,7 +158,9 @@ ones: the Pico SDK carries newlib, as do Zephyr and FreeRTOS applications.
 ```
 sh/sysl/miniz/
   miniz.sysl        what a program calls: Deflater, Inflater, Result
+  stream.sysl       Decoder, and the gzip header and trailer
   tests.sysl
+  stream_tests.sysl against streams zlib, Python and gzip(1) wrote
   c/
     miniz.c         upstream 3.0.2, unmodified
     miniz.h         upstream 3.0.2, one #define guarded
@@ -167,7 +216,13 @@ being guaranteed one, and the suite now feeds a deliberately misaligned slice to
 
 ## Tests
 
-`sysl test .` — 27 tests, both layers.
+`sysl test .` — 47 tests, both layers.
+
+The `Decoder`'s oracle is the formats and the tools that write them: a zlib and a raw stream from
+Python's `zlib`, a gzip file from the system's `gzip -9`, and a gzip header built by hand with
+FEXTRA, FNAME, FCOMMENT and FHCRC all set, which `gzip -t` and Python's `gzip.decompress` both accept.
+Each is decoded at every chunk size, every prefix of each is `Truncated`, and a megabyte of zeros
+comes back through the 32 KB ring from a stream under 2 KB.
 
 The one worth knowing about: miniz round-tripping its own output proves the binding is
 self-consistent, not that it is *right*. So the suite also inflates 36 bytes **zlib** produced from

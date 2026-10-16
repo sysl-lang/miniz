@@ -1,0 +1,381 @@
+module sh.sysl.miniz
+@tests
+
+import sysl.buf.{Buf, buf}
+
+// The `Decoder`, checked against streams other programs made.
+//
+// **The oracle is the formats and the tools that write them, never miniz.** `ZLIB` and `RAW` are
+// Python's `zlib.compress(text, 9)` and `zlib.compressobj(9, DEFLATED, -15)`; `GZIP` is the system's
+// `gzip -9 -c pack.txt`, so it carries FNAME and an MTIME; `GZIP_FLAGS` is the same deflate data under
+// a header built by hand with FEXTRA, FNAME, FCOMMENT and FHCRC all set, which `gzip -t` and Python's
+// `gzip.decompress` both accept. Each was checked to decompress to `text()` by the program that made
+// it before its bytes were copied here.
+
+private text() -> string =
+    "Pack my box with five dozen liquor jugs. Pack my box with five dozen liquor jugs. " +
+    "Pack my box with five dozen liquor jugs. Pack my box with five dozen liquor jugs. " +
+    "Pack my box with five dozen liquor jugs. " +
+    "Sphinx of black quartz, judge my vow; how vexingly quick daft zebras jump!\n"
+
+private val ZLIB: [112]u8 = [
+    0x78, 0xda, 0xd5, 0xcc, 0xc9, 0x11, 0x83, 0x30, 0x10, 0x44, 0xd1, 0xbb,
+    0xa3, 0x68, 0xdf, 0x5d, 0x4e, 0xc0, 0x49, 0x50, 0xe5, 0x08, 0x24, 0x6b,
+    0x1b, 0x23, 0x34, 0x20, 0xb4, 0xa1, 0xe8, 0x11, 0x61, 0x70, 0xee, 0xd7,
+    0x7f, 0x12, 0xbf, 0x19, 0xcb, 0x01, 0xc9, 0x0d, 0x95, 0x92, 0x83, 0xa1,
+    0xa2, 0xa1, 0xb8, 0xeb, 0x00, 0x4f, 0x5b, 0xe6, 0x88, 0x7f, 0xb6, 0xfb,
+    0x1b, 0xd3, 0x0d, 0xe0, 0x77, 0x75, 0x14, 0x1a, 0xd8, 0x40, 0xfa, 0xeb,
+    0xb3, 0x65, 0x11, 0x53, 0x7f, 0x8d, 0x55, 0x59, 0x7d, 0x15, 0x0a, 0xd7,
+    0x0f, 0x1c, 0x57, 0x14, 0xdd, 0x28, 0x58, 0x7f, 0x0c, 0x42, 0x03, 0x2a,
+    0x61, 0x12, 0xba, 0x96, 0x51, 0xec, 0x03, 0x2f, 0xeb, 0xf3, 0x71, 0x02,
+    0x40, 0x18, 0x64, 0xad
+]
+
+private val RAW: [106]u8 = [
+    0xd5, 0xcc, 0xc9, 0x11, 0x83, 0x30, 0x10, 0x44, 0xd1, 0xbb, 0xa3, 0x68,
+    0xdf, 0x5d, 0x4e, 0xc0, 0x49, 0x50, 0xe5, 0x08, 0x24, 0x6b, 0x1b, 0x23,
+    0x34, 0x20, 0xb4, 0xa1, 0xe8, 0x11, 0x61, 0x70, 0xee, 0xd7, 0x7f, 0x12,
+    0xbf, 0x19, 0xcb, 0x01, 0xc9, 0x0d, 0x95, 0x92, 0x83, 0xa1, 0xa2, 0xa1,
+    0xb8, 0xeb, 0x00, 0x4f, 0x5b, 0xe6, 0x88, 0x7f, 0xb6, 0xfb, 0x1b, 0xd3,
+    0x0d, 0xe0, 0x77, 0x75, 0x14, 0x1a, 0xd8, 0x40, 0xfa, 0xeb, 0xb3, 0x65,
+    0x11, 0x53, 0x7f, 0x8d, 0x55, 0x59, 0x7d, 0x15, 0x0a, 0xd7, 0x0f, 0x1c,
+    0x57, 0x14, 0xdd, 0x28, 0x58, 0x7f, 0x0c, 0x42, 0x03, 0x2a, 0x61, 0x12,
+    0xba, 0x96, 0x51, 0xec, 0x03, 0x2f, 0xeb, 0xf3, 0x71, 0x02
+]
+
+// Ten fixed bytes, then "pack.txt" and its zero as FNAME, then the deflate data from byte 19, then
+// the CRC-32 at 125 and ISIZE at 129.
+private val GZIP: [133]u8 = [
+    0x1f, 0x8b, 0x08, 0x08, 0x50, 0xb7, 0xd2, 0x6a, 0x02, 0x03, 0x70, 0x61,
+    0x63, 0x6b, 0x2e, 0x74, 0x78, 0x74, 0x00, 0xd5, 0xcc, 0xc9, 0x11, 0x83,
+    0x30, 0x10, 0x44, 0xd1, 0xbb, 0xa3, 0x68, 0xdf, 0x5d, 0x4e, 0xc0, 0x49,
+    0x50, 0xe5, 0x08, 0x24, 0x6b, 0x1b, 0x23, 0x34, 0x20, 0xb4, 0xa1, 0xe8,
+    0x11, 0x61, 0x70, 0xee, 0xd7, 0x7f, 0x12, 0xbf, 0x19, 0xcb, 0x01, 0xc9,
+    0x0d, 0x95, 0x92, 0x83, 0xa1, 0xa2, 0xa1, 0xb8, 0xeb, 0x00, 0x4f, 0x5b,
+    0xe6, 0x88, 0x7f, 0xb6, 0xfb, 0x1b, 0xd3, 0x0d, 0xe0, 0x77, 0x75, 0x14,
+    0x1a, 0xd8, 0x40, 0xfa, 0xeb, 0xb3, 0x65, 0x11, 0x53, 0x7f, 0x8d, 0x55,
+    0x59, 0x7d, 0x15, 0x0a, 0xd7, 0x0f, 0x1c, 0x57, 0x14, 0xdd, 0x28, 0x58,
+    0x7f, 0x0c, 0x42, 0x03, 0x2a, 0x61, 0x12, 0xba, 0x96, 0x51, 0xec, 0x03,
+    0x2f, 0xeb, 0xf3, 0x71, 0x02, 0xcd, 0x7e, 0xd7, 0x6f, 0x18, 0x01, 0x00,
+    0x00
+]
+
+// FLG 0x1e: an FEXTRA of six bytes at 10, "pack.txt" at 18, "a comment" at 27, and the FHCRC at 37
+// -- `64 64`, the low half of the CRC-32 of the 37 bytes before it.
+private val GZIP_FLAGS: [153]u8 = [
+    0x1f, 0x8b, 0x08, 0x1e, 0x00, 0xf1, 0x53, 0x65, 0x02, 0x03, 0x06, 0x00,
+    0x41, 0x42, 0x02, 0x00, 0x68, 0x69, 0x70, 0x61, 0x63, 0x6b, 0x2e, 0x74,
+    0x78, 0x74, 0x00, 0x61, 0x20, 0x63, 0x6f, 0x6d, 0x6d, 0x65, 0x6e, 0x74,
+    0x00, 0x64, 0x64, 0xd5, 0xcc, 0xc9, 0x11, 0x83, 0x30, 0x10, 0x44, 0xd1,
+    0xbb, 0xa3, 0x68, 0xdf, 0x5d, 0x4e, 0xc0, 0x49, 0x50, 0xe5, 0x08, 0x24,
+    0x6b, 0x1b, 0x23, 0x34, 0x20, 0xb4, 0xa1, 0xe8, 0x11, 0x61, 0x70, 0xee,
+    0xd7, 0x7f, 0x12, 0xbf, 0x19, 0xcb, 0x01, 0xc9, 0x0d, 0x95, 0x92, 0x83,
+    0xa1, 0xa2, 0xa1, 0xb8, 0xeb, 0x00, 0x4f, 0x5b, 0xe6, 0x88, 0x7f, 0xb6,
+    0xfb, 0x1b, 0xd3, 0x0d, 0xe0, 0x77, 0x75, 0x14, 0x1a, 0xd8, 0x40, 0xfa,
+    0xeb, 0xb3, 0x65, 0x11, 0x53, 0x7f, 0x8d, 0x55, 0x59, 0x7d, 0x15, 0x0a,
+    0xd7, 0x0f, 0x1c, 0x57, 0x14, 0xdd, 0x28, 0x58, 0x7f, 0x0c, 0x42, 0x03,
+    0x2a, 0x61, 0x12, 0xba, 0x96, 0x51, 0xec, 0x03, 0x2f, 0xeb, 0xf3, 0x71,
+    0x02, 0xcd, 0x7e, 0xd7, 0x6f, 0x18, 0x01, 0x00, 0x00
+]
+
+// Feed `src` to a fresh decoder `step` bytes at a time, then finish, answering everything it wrote.
+private decode(wrapper: Wrapper, src: []const u8, step: usize) -> Result[Buf[u8], Error]
+    val d = decoder(wrapper)
+    val out: Buf[u8] = buf()
+
+    var at: usize = 0
+
+    while at < src.len
+        val end = if at + step < src.len then at + step else src.len
+
+        d.feed(src[at..<end], out)?
+
+        at = end
+
+    d.finish()?
+
+    Ok(out)
+end decode
+
+// Every chunk size from one byte to the whole stream, each answering exactly `want`.
+private every_split_gives(wrapper: Wrapper, src: []const u8, want: []const u8)
+    for step in 1..src.len
+        val out = decode(wrapper, src, step).unwrap()
+
+        if out.view() != want then print("differs in chunks of", step)
+
+        assert(out.view() == want)
+end every_split_gives
+
+// What a decode that should fail failed with.
+private failure(wrapper: Wrapper, src: []const u8, step: usize) -> Error = decode(wrapper, src, step) match
+    Ok(_) ->
+        assert(false, "expected a failure")
+        Corrupt
+    Err(e) -> e
+
+// A gzip member around miniz's own raw deflate of `src`, framed by the RFC rather than by anything
+// under test: ten fixed bytes with no flags, the data, and the trailer.
+private gzip_of(src: []const u8) -> Buf[u8]
+    val packed: []u8 = [0; bound(src.len)]
+    val n = deflate(deflate_storage, src, packed, Level.Default, Format.Raw).unwrap()
+
+    val g: Buf[u8] = buf()
+    val head: [10]u8 = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 255]
+
+    g.extend(head)
+    g.extend(packed[0..<n])
+
+    le32_onto(g, crc32(src))
+    le32_onto(g, u32(src.len & 0xFFFFFFFF))
+
+    g
+end gzip_of
+
+private le32_onto(g: Buf[u8], v: u32)
+    for i in 0..<4 do g.push(u8((v >> (8 * i)) & 0xFF))
+
+// -- Every format, every split -----------------------------------------------------------------------
+
+@test("each wrapper decodes what the tool that writes it wrote")
+each_wrapper_decodes_its_fixture()
+    val want = text().bytes
+
+    assert(decode(Wrapper.Zlib, ZLIB, ZLIB.len).unwrap().view() == want)
+    assert(decode(Wrapper.Raw, RAW, RAW.len).unwrap().view() == want)
+    assert(decode(Wrapper.Gzip, GZIP, GZIP.len).unwrap().view() == want)
+    assert(decode(Wrapper.Gzip, GZIP_FLAGS, GZIP_FLAGS.len).unwrap().view() == want)
+end each_wrapper_decodes_its_fixture
+
+@test("a zlib stream decodes identically split at every size")
+zlib_every_split()
+    every_split_gives(Wrapper.Zlib, ZLIB, text().bytes)
+
+@test("a raw deflate stream decodes identically split at every size")
+raw_every_split()
+    every_split_gives(Wrapper.Raw, RAW, text().bytes)
+
+@test("a gzip stream decodes identically split at every size")
+gzip_every_split()
+    every_split_gives(Wrapper.Gzip, GZIP, text().bytes)
+
+// Every split of this one lands somewhere inside the header for the small sizes: in the FEXTRA length,
+// inside the extra field, in the name, in the comment, between the two FHCRC bytes.
+@test("a gzip header with every optional field decodes split at every size")
+gzip_all_fields_every_split()
+    every_split_gives(Wrapper.Gzip, GZIP_FLAGS, text().bytes)
+
+// -- Detecting the wrapper ---------------------------------------------------------------------------
+
+@test("detection reads zlib as zlib and gzip as gzip, whole or a byte at a time")
+detect_tells_zlib_from_gzip()
+    every_split_gives(Wrapper.Detect, ZLIB, text().bytes)
+    every_split_gives(Wrapper.Detect, GZIP, text().bytes)
+    every_split_gives(Wrapper.Detect, GZIP_FLAGS, text().bytes)
+
+// The default is detection, so a caller who names nothing gets the header-reading behaviour.
+@test("a decoder made with no argument detects")
+the_default_detects()
+    val d = decoder()
+    val out: Buf[u8] = buf()
+
+    assert_eq(d.feed(GZIP, out).unwrap(), text().bytes.len)
+    assert(d.is_done())
+    assert(d.finish().is_ok())
+
+// Raw deflate has no header to detect, so detection reads its first byte as a zlib header -- and
+// `d5` is not one.
+@test("detection does not mistake raw deflate for either wrapper")
+detect_refuses_raw()
+    assert(failure(Wrapper.Detect, RAW, RAW.len) == Corrupt)
+
+// -- Round trips through this package's own compressor -----------------------------------------------
+
+@test("all three wrappers round trip through deflate")
+round_trips_through_deflate()
+    val want = text().bytes
+    val packed: []u8 = [0; 512]
+
+    val z = deflate(deflate_storage, want, packed).unwrap()
+
+    every_split_gives(Wrapper.Zlib, packed[0..<z], want)
+
+    val r = deflate(deflate_storage, want, packed, Level.Default, Format.Raw).unwrap()
+
+    every_split_gives(Wrapper.Raw, packed[0..<r], want)
+
+    every_split_gives(Wrapper.Gzip, gzip_of(want).view(), want)
+end round_trips_through_deflate
+
+// **Far more output than the 32 KB ring holds**, so the ring wraps many times and a single small chunk
+// has to come out as tens of kilobytes: a megabyte of zeros deflates to about a kilobyte.
+@test("a megabyte of zeros comes back whole from a stream a thousandth its size")
+high_ratio_output_exceeds_the_ring()
+    val zeros: []u8 = [0; 1048576]
+
+    val g = gzip_of(zeros)
+
+    assert(g.len() < 2048)
+
+    for step in [1, 7, 4096, g.len()]
+        val out = decode(Wrapper.Gzip, g.view(), step).unwrap()
+
+        assert_eq(out.len(), zeros.len)
+        assert(out.view() == zeros)
+end high_ratio_output_exceeds_the_ring
+
+// The answer from `feed` is the count it appended, so a caller can tell a chunk that produced nothing
+// from one that produced a lot without measuring the buffer itself.
+@test("feed answers how many bytes it appended")
+feed_answers_its_count()
+    val d = decoder(Wrapper.Zlib)
+    val out: Buf[u8] = buf()
+
+    out.push(u8('>'))
+
+    // The two-byte zlib header produces nothing; the rest produces all of it.
+    assert_eq(d.feed(ZLIB[0..<2], out).unwrap(), 0)
+    assert_eq(d.feed(ZLIB[2..], out).unwrap(), text().bytes.len)
+    assert_eq(out.len(), text().bytes.len + 1)
+    assert_eq(out.at(0), u8('>'))
+end feed_answers_its_count
+
+// -- What goes wrong ---------------------------------------------------------------------------------
+
+@test("a corrupted byte in the data is Corrupt, whatever the chunking")
+corrupted_data_is_corrupt()
+    var bad = ZLIB
+    bad[40] ^= 0xFF
+
+    for step in [1, 5, bad.len]
+        val e = failure(Wrapper.Zlib, bad, step)
+
+        assert(e == Corrupt || e == Truncated, "a damaged stream must not decode")
+
+    var bad_raw = RAW
+    bad_raw[0] = 0xFF
+
+    assert(failure(Wrapper.Raw, bad_raw, 1) == Corrupt)
+end corrupted_data_is_corrupt
+
+// Altering a stored checksum leaves the data intact, so the only thing that can catch it is the
+// comparison itself.
+@test("a gzip trailer whose CRC-32 is wrong is BadCrc")
+bad_crc_is_reported()
+    var bad = GZIP
+    bad[125] ^= 0x01
+
+    for step in [1, 3, bad.len] do assert(failure(Wrapper.Gzip, bad, step) == BadCrc)
+
+@test("a gzip trailer whose ISIZE is wrong is BadLength")
+bad_length_is_reported()
+    var bad = GZIP
+    bad[129] ^= 0x01
+
+    for step in [1, 3, bad.len] do assert(failure(Wrapper.Gzip, bad, step) == BadLength)
+
+// A zlib stream's Adler-32 is miniz's to check, and it does: the data decodes and the checksum then
+// disagrees, which the whole-buffer `inflate` has always reported as `Corrupt`.
+@test("a zlib trailer whose Adler-32 is wrong is Corrupt")
+bad_adler_is_corrupt()
+    var bad = ZLIB
+    bad[111] ^= 0x01
+
+    assert(failure(Wrapper.Zlib, bad, 1) == Corrupt)
+
+@test("a gzip header that is not one is BadHeader")
+bad_headers_are_refused()
+    var magic = GZIP
+    magic[1] = 0x8C
+
+    assert(failure(Wrapper.Gzip, magic, 1) == BadHeader)
+
+    var method = GZIP
+    method[2] = 7
+
+    assert(failure(Wrapper.Gzip, method, 1) == BadHeader)
+
+    var reserved = GZIP
+    reserved[3] |= 0x20
+
+    assert(failure(Wrapper.Gzip, reserved, 1) == BadHeader)
+
+    // The comment's last letter, which the FHCRC covers and nothing else checks.
+    var hcrc = GZIP_FLAGS
+    hcrc[35] = u8('s')
+
+    for step in [1, 2, hcrc.len] do assert(failure(Wrapper.Gzip, hcrc, step) == BadHeader)
+end bad_headers_are_refused
+
+// **Every prefix of every fixture is a truncated stream**, including the empty one and the one missing
+// only its last trailer byte, and `finish` is what says so -- `feed` cannot, since more might come.
+@test("a stream finished before its end is Truncated, wherever it was cut")
+every_prefix_is_truncated()
+    for n in 0..<ZLIB.len do assert(failure(Wrapper.Zlib, ZLIB[0..<n], 1) == Truncated)
+    for n in 0..<RAW.len do assert(failure(Wrapper.Raw, RAW[0..<n], 1) == Truncated)
+    for n in 0..<GZIP.len do assert(failure(Wrapper.Gzip, GZIP[0..<n], 1) == Truncated)
+    for n in 0..<GZIP_FLAGS.len do assert(failure(Wrapper.Detect, GZIP_FLAGS[0..<n], 7) == Truncated)
+end every_prefix_is_truncated
+
+@test("a byte after the end of the stream is Trailing, in the same chunk or a later one")
+bytes_after_the_end_are_trailing()
+    val more: Buf[u8] = buf()
+
+    more.extend(GZIP)
+    more.push(0)
+
+    for step in [1, 2, more.len()] do assert(failure(Wrapper.Gzip, more.view(), step) == Trailing)
+
+    // A second gzip member is the ordinary way to have them, and it is refused rather than dropped.
+    val two: Buf[u8] = buf()
+
+    two.extend(GZIP)
+    two.extend(GZIP)
+
+    val d = decoder(Wrapper.Gzip)
+    val out: Buf[u8] = buf()
+
+    assert(d.feed(two.view(), out) == Err(Trailing))
+
+    // What came before the trailing bytes was produced and kept.
+    assert(out.view() == text().bytes)
+
+    // An empty chunk after the end is no bytes after the end.
+    val e = decoder(Wrapper.Zlib)
+
+    e.feed(ZLIB, out).unwrap()
+
+    assert_eq(e.feed([], out).unwrap(), 0)
+    assert(e.finish().is_ok())
+end bytes_after_the_end_are_trailing
+
+// The whole-buffer `inflate` answers the same, so the two halves of the package agree about where a
+// stream ends.
+@test("inflate refuses bytes after the end of its stream too")
+inflate_refuses_trailing_bytes()
+    val more: Buf[u8] = buf()
+
+    more.extend(ZLIB)
+    more.push(0)
+
+    val out: []u8 = [0; 512]
+
+    assert(inflate(inflate_storage, more.view(), out) == Err(Trailing))
+    assert_eq(inflate(inflate_storage, ZLIB, out).unwrap(), text().bytes.len)
+end inflate_refuses_trailing_bytes
+
+// A decoder that has failed keeps failing the same way, rather than resuming partway through a stream
+// it has already lost its place in.
+@test("an error is answered again by every later call")
+errors_stick()
+    var bad = GZIP
+    bad[0] = 0
+
+    val d = decoder(Wrapper.Gzip)
+    val out: Buf[u8] = buf()
+
+    assert(d.feed(bad[0..<4], out) == Err(BadHeader))
+    assert(d.feed(GZIP, out) == Err(BadHeader))
+    assert(d.finish() == Err(BadHeader))
+    assert_eq(out.len(), 0)
+end errors_stick
