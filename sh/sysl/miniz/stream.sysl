@@ -26,13 +26,19 @@
 // of what it decompresses to -- so the header is walked here one byte at a time, which is what lets it
 // arrive split anywhere, and the trailer is checked against a CRC kept over the output as it leaves.
 //
-// ## What follows the end of a stream is an error
+// ## Members, and what follows the end of a stream
 //
-// A byte after the last one the stream needed is `Trailing`, from `feed` and from the whole-buffer
-// `inflate` alike. Ignoring it would be the quiet choice and the wrong one: `cat a.gz b.gz` is a valid
-// gzip file of two members, and a decoder that stopped after the first and said nothing would hand
-// back half the data as though it were all of it. Reading further members is not done here; refusing
-// them is what keeps that from being silent.
+// `cat a.gz b.gz` is a valid gzip file of two members, and node's `gunzipSync`, `DecompressionStream`
+// and zlib's `gunzip` all decode it as the two outputs joined. So does a gzip `Decoder`: when a member's
+// trailer checks out and more bytes follow, they are a fresh gzip stream -- its own header, CRC and
+// ISIZE -- and the output is the concatenation. A chunk may end anywhere, between members included.
+// `is_done` is true between members, since the stream may end there; `finish` mid-way through a later
+// member is `Truncated`.
+//
+// A byte that does not begin another member is `Trailing`, which is what node does with junk after a
+// gzip member (`Z_DATA_ERROR`). Zero padding, which node and gzip(1) tolerate, is `Trailing` too.
+// A byte past the end of a zlib or raw stream is `Trailing` as well: those have no members.
+// The whole-buffer `inflate` reads raw and zlib only, so it is unchanged.
 
 module sh.sysl.miniz
 
@@ -91,6 +97,9 @@ private enum Phase
     // gzip's CRC-32 and ISIZE.
     Trailer
 
+    // A gzip member is complete and another may follow.
+    Between
+
     Done
 end Phase
 
@@ -136,8 +145,10 @@ struct Decoder
     // become right by being fed more.
     private broken: Option[Error]
 
-    // Whether the end of the stream has been reached, trailer and all.
-    is_done(self) -> bool = self.phase == Phase.Done
+    // Whether the stream may end here: it has reached its end, trailer and all. For gzip that is true
+    // between members too, since a stream of one member and a stream of two are both valid and only the
+    // next byte, or `finish`, says which this is.
+    is_done(self) -> bool = self.phase == Phase.Done || self.phase == Phase.Between
 
     // Decode another chunk of the stream, appending what it produces to `out`, and answer how many
     // bytes were appended.
@@ -165,7 +176,7 @@ struct Decoder
     finish(self) -> Result[unit, Error]
         if self.broken is Some(e) then return Err(e)
 
-        if self.phase != Phase.Done then return Err(Truncated)
+        if !self.is_done() then return Err(Truncated)
 
         Ok(())
     end finish
@@ -176,6 +187,12 @@ struct Decoder
         while at < chunk.len
             self.phase match
                 Done -> return Err(Trailing)
+
+                // Another member begins with the gzip magic's first byte, and anything else is junk.
+                Between ->
+                    if chunk[at] != 0x1F then return Err(Trailing)
+
+                    self.start_member()
 
                 Body -> at += self.inflate_some(chunk[at..], out)?
 
@@ -248,6 +265,19 @@ struct Decoder
         Ok(())
     end header_byte
 
+    // Begin the next gzip member: a fresh decompressor, checksum and header, over the same memory. Its
+    // first byte is not consumed here -- the header walk reads it.
+    private start_member(*self)
+        c.tinfl_init(self.state)
+
+        self.ring_at = 0
+        self.crc = 0
+        self.size = 0
+        self.header_crc = 0
+        self.flags = 0
+        self.next(Phase.Fixed)
+    end start_member
+
     private next(*self, phase: Phase)
         self.phase = phase
         self.seen = 0
@@ -305,7 +335,7 @@ struct Decoder
 
         if le32(self.trailer, 4) != self.size then return Err(BadLength)
 
-        self.next(Phase.Done)
+        self.next(Phase.Between)
 
         Ok(())
     end check_trailer

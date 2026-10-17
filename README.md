@@ -119,15 +119,21 @@ two negative integers a caller has to know apart.
 | `Truncated` | the input stopped mid-stream. **Half a download, not a corrupt one** — the difference matters to whatever is retrying |
 | `Corrupt` | not a valid stream, or the wrapper's checksum disagreed with the data |
 | `NoRoom(needed)` | the storage slice is smaller than `DEFLATE_BYTES` or `INFLATE_BYTES` |
-| `Trailing` | bytes after the end of the stream — from `inflate` and from a `Decoder` alike |
+| `Trailing` | bytes after the end of the stream (for gzip, after a member and not starting another) — from `inflate` and from a `Decoder` |
 | `BadHeader` | a gzip header that is not one: wrong magic, a method other than deflate, a reserved flag, or an FHCRC that disagrees |
 | `BadCrc` / `BadLength` | a gzip trailer's CRC-32 or ISIZE disagrees with what was decoded |
 
-**Bytes after the end are an error, not something to skip.** The ordinary way to have them is a
-second gzip member — `cat a.gz b.gz` is a valid gzip file — and a decoder that stopped after the
-first and said nothing would hand back half the data as though it were all of it. Further members
-are not read; refusing them is what keeps that from being silent. Before 0.3.0 `inflate` ignored
-them.
+**Multi-member gzip decodes (0.3.1).** `cat a.gz b.gz` is a valid gzip file, and node's
+`gunzipSync`, `DecompressionStream("gzip")` and zlib's `gunzip` all answer the two outputs joined;
+a gzip `Decoder` now does too, where 0.3.0 refused it as `Trailing`. Each member's header, CRC and
+ISIZE are checked on their own, a chunk may end anywhere (between members included), and `is_done`
+is true between members, since the stream may end there. `finish` mid-way through a later member is
+`Truncated`.
+
+**Other bytes after the end are an error, not something to skip.** A byte after a gzip member that
+is not the start of another (node answers `Z_DATA_ERROR` for junk), and any byte after a zlib or raw
+stream, is `Trailing`. Zero padding, which node and gzip(1) tolerate, is `Trailing` here too. The
+whole-buffer `inflate` reads raw and zlib only, so it has no members and is unchanged.
 
 `Error` derives `Eq`, so a result can be compared with `==`.
 

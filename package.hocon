@@ -7,15 +7,15 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       miniz { git = "github.com/sysl-lang/miniz", version = "0.3.0" }
+//       miniz { git = "github.com/sysl-lang/miniz", version = "0.3.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.3.0` on this repository.
+// tag `v0.3.1` on this repository.
 
 package {
   name    = "miniz"
-  version = "0.3.0"
+  version = "0.3.1"
 
   // **The floor is the compiler `Decoder` was written and tested against.** It was 0.0.81 before
   // that, for `sysl.slices.align_up`, and 0.0.65 before that, for the `defines` block below. It is a

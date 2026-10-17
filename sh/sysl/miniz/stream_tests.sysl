@@ -326,19 +326,20 @@ bytes_after_the_end_are_trailing()
 
     for step in [1, 2, more.len()] do assert(failure(Wrapper.Gzip, more.view(), step) == Trailing)
 
-    // A second gzip member is the ordinary way to have them, and it is refused rather than dropped.
-    val two: Buf[u8] = buf()
-
-    two.extend(GZIP)
-    two.extend(GZIP)
-
+    // Junk after a member: what came before it was produced and kept.
     val d = decoder(Wrapper.Gzip)
     val out: Buf[u8] = buf()
 
-    assert(d.feed(two.view(), out) == Err(Trailing))
-
-    // What came before the trailing bytes was produced and kept.
+    assert(d.feed(more.view(), out) == Err(Trailing))
     assert(out.view() == text().bytes)
+
+    // A zlib stream has no members, so a second one is trailing bytes.
+    val zz: Buf[u8] = buf()
+
+    zz.extend(ZLIB)
+    zz.extend(ZLIB)
+
+    for step in [1, 7, zz.len()] do assert(failure(Wrapper.Zlib, zz.view(), step) == Trailing)
 
     // An empty chunk after the end is no bytes after the end.
     val e = decoder(Wrapper.Zlib)
@@ -379,3 +380,138 @@ errors_stick()
     assert(d.finish() == Err(BadHeader))
     assert_eq(out.len(), 0)
 end errors_stick
+
+// -- Members --------------------------------------------------------------------------------------------
+
+// `printf ab | gzip -9 -n`, `printf cd | gzip -9 -n`, `printf '' | gzip -9 -n`: what `cat a.gz b.gz`
+// is made of. `gzip -dc` answers "abcd" for the first two joined and "ab" for the first with the empty one.
+private val AB: [22]u8 = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x4b, 0x4c,
+    0x02, 0x00, 0x6d, 0x48, 0x83, 0x9e, 0x02, 0x00, 0x00, 0x00
+]
+
+private val CD: [22]u8 = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x4b, 0x4e,
+    0x01, 0x00, 0xda, 0x8f, 0xd6, 0x45, 0x02, 0x00, 0x00, 0x00
+]
+
+private val EMPTY: [20]u8 = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x03, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+]
+
+private joined(a: []const u8, b: []const u8, c: []const u8 = []) -> Buf[u8]
+    val j: Buf[u8] = buf()
+
+    j.extend(a)
+    j.extend(b)
+    j.extend(c)
+
+    j
+end joined
+
+@test("two gzip members decode as their outputs joined, at every chunk size")
+two_members()
+    val both = joined(AB, CD)
+
+    every_split_gives(Wrapper.Gzip, both.view(), "abcd".bytes)
+    every_split_gives(Wrapper.Detect, both.view(), "abcd".bytes)
+
+@test("three members, and an empty member in the middle")
+three_members()
+    val three = joined(AB, CD, AB)
+
+    every_split_gives(Wrapper.Gzip, three.view(), "abcdab".bytes)
+
+    val mid = joined(AB, EMPTY, CD)
+
+    every_split_gives(Wrapper.Gzip, mid.view(), "abcd".bytes)
+
+    val last = joined(AB, EMPTY)
+
+    every_split_gives(Wrapper.Gzip, last.view(), "ab".bytes)
+
+@test("a later member may carry every optional header field")
+later_member_with_all_fields()
+    val both = joined(GZIP, GZIP_FLAGS, AB)
+    val want = (text() + text() + "ab").bytes
+
+    every_split_gives(Wrapper.Gzip, both.view(), want)
+
+    val flagged_first = joined(AB, GZIP_FLAGS)
+
+    every_split_gives(Wrapper.Gzip, flagged_first.view(), ("ab" + text()).bytes)
+
+@test("is_done holds between members, and finish there is Ok")
+done_between_members()
+    val d = decoder(Wrapper.Gzip)
+    val out: Buf[u8] = buf()
+
+    assert(!d.is_done())
+
+    d.feed(AB, out).unwrap()
+
+    assert(d.is_done())
+    assert(d.finish().is_ok())
+
+    d.feed(CD[0..<5], out).unwrap()
+
+    assert(!d.is_done())
+    assert(d.finish() == Err(Truncated))
+
+@test("a member's own CRC and ISIZE are checked, whichever member it is")
+later_member_checks_its_trailer()
+    var crc = CD
+    crc[14] = 0
+
+    val bad_crc = joined(AB, crc)
+
+    for step in [1, 5, bad_crc.len()] do assert(failure(Wrapper.Gzip, bad_crc.view(), step) == BadCrc)
+
+    var len = CD
+    len[18] = 3
+
+    val bad_len = joined(AB, len)
+
+    for step in [1, 5, bad_len.len()] do assert(failure(Wrapper.Gzip, bad_len.view(), step) == BadLength)
+
+    // The first member's checksum does not carry into the second: the second alone is valid.
+    assert(decode(Wrapper.Gzip, CD, 3).unwrap().view() == "cd".bytes)
+
+    // And the first member's being wrong still stops everything.
+    var first = AB
+    first[14] = 0
+
+    assert(failure(Wrapper.Gzip, joined(first, CD).view(), 4) == BadCrc)
+
+@test("a stream cut inside a later member's header or body is Truncated")
+cut_in_a_later_member()
+    // Every prefix of the second member but the empty one and the whole: its header (ten bytes), then
+    // its body and trailer.
+    for k in 1..<CD.len do
+        val cut = joined(AB, CD[0..<k])
+
+        assert(failure(Wrapper.Gzip, cut.view(), 3) == Truncated)
+
+@test("junk after a member is Trailing, as node's gunzip refuses it")
+junk_after_a_member()
+    val junk: [4]u8 = [0x6a, 0x75, 0x6e, 0x6b]
+    val after = joined(AB, junk)
+
+    for step in [1, 2, after.len()] do assert(failure(Wrapper.Gzip, after.view(), step) == Trailing)
+
+    // Between two members is junk too, and the second member is never reached.
+    junk_between_members()
+
+    // A byte that starts the magic and is not it is a bad header, not trailing bytes.
+    val bad: [2]u8 = [0x1f, 0x00]
+
+    assert(failure(Wrapper.Gzip, joined(AB, bad).view(), 1) == BadHeader)
+
+private junk_between_members()
+    val d = decoder(Wrapper.Gzip)
+    val out: Buf[u8] = buf()
+    val j = joined(AB, [0], CD)
+
+    assert(d.feed(j.view(), out) == Err(Trailing))
+    assert(out.view() == "ab".bytes)
