@@ -43,6 +43,7 @@
 module sh.sysl.miniz
 
 import sh.sysl.miniz.c
+import sysl.raw.ptr_cast
 import sysl.slices.{as_ptr, as_mut_ptr, align_up}
 import sysl.buf.Buf
 

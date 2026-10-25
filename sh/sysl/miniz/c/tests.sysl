@@ -1,6 +1,7 @@
 module sh.sysl.miniz.c
 @tests
 
+import sysl.raw.ptr_cast
 import sysl.slices.{as_ptr, as_mut_ptr, is_aligned}
 
 // The survey's four questions, asked of the real compiler.

@@ -175,7 +175,7 @@ sh/sysl/miniz/
     tests.sysl      that sysl and clang agree about miniz
 ```
 
-**The options are a `defines` block in `package.hocon`**, which needs sysl 0.0.65 or later:
+**The options are a `defines` block in `sysl.hocon`**, which needs sysl 0.0.65 or later:
 
 ```hocon
 defines {
