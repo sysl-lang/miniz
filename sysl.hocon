@@ -15,12 +15,12 @@
 
 package {
   name    = "miniz"
-  version = "0.3.2"
+  version = "0.3.3"
 
   // **The floor is the compiler `Decoder` was written and tested against.** It was 0.0.81 before
   // that, for `sysl.slices.align_up`, and 0.0.65 before that, for the `defines` block below. It is a
   // key so that an older compiler is refused rather than failing on a name it has never heard of.
-  sysl = "0.6.0"
+  sysl = "0.9.0"
 }
 
 // **There is deliberately no `requires` block, though `requires {}` would be exact.**

@@ -237,7 +237,7 @@ feed_answers_its_count()
     assert_eq(d.feed(ZLIB[0..<2], out).unwrap(), 0)
     assert_eq(d.feed(ZLIB[2..], out).unwrap(), text().bytes.len)
     assert_eq(out.len(), text().bytes.len + 1)
-    assert_eq(out.at(0), u8('>'))
+    assert_eq(out[0], u8('>'))
 end feed_answers_its_count
 
 // -- What goes wrong ---------------------------------------------------------------------------------
