@@ -160,7 +160,7 @@ struct Decoder
     //
     // A byte past the end of the stream is `Trailing`. Whatever the chunk produced before that point
     // is already in `out`.
-    feed(*self, chunk: []const u8, out: Buf[u8]) -> Result[usize, Error]
+    feed(*self, chunk: []const u8, out: *Buf[u8]) -> Result[usize, Error]
         if self.broken is Some(e) then return Err(e)
 
         val before = out.len()
@@ -182,7 +182,7 @@ struct Decoder
         Ok(())
     end finish
 
-    private take(*self, chunk: []const u8, out: Buf[u8]) -> Result[unit, Error]
+    private take(*self, chunk: []const u8, out: *Buf[u8]) -> Result[unit, Error]
         var at: usize = 0
 
         while at < chunk.len
@@ -290,7 +290,7 @@ struct Decoder
     // the end of the stream, so it waits for the next one rather than reading zeros past the end of
     // this. Only `finish` knows the stream is over, and it needs nothing from miniz to say so: a valid
     // stream reaches its end on the bytes it is made of, and miniz takes no byte it does not need.
-    private inflate_some(*self, src: []const u8, out: Buf[u8]) -> Result[usize, Error]
+    private inflate_some(*self, src: []const u8, out: *Buf[u8]) -> Result[usize, Error]
         var at: usize = 0
 
         var flags = c.HAS_MORE_INPUT
